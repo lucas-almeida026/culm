@@ -99,6 +99,40 @@ pub fn encode(k: &KeyEvent) -> Option<Vec<u8>> {
     Some(base)
 }
 
+/// How a child asked for mouse events to be encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEncoding {
+    /// The original single-byte encoding. Breaks past column 223.
+    Default,
+    /// The SGR encoding, which carries any coordinate.
+    Sgr,
+}
+
+/// Wheel up and wheel down, as xterm numbers them.
+const WHEEL_UP: u8 = 64;
+const WHEEL_DOWN: u8 = 65;
+
+/// Encodes one wheel notch for a child that asked for mouse reporting.
+///
+/// `column` and `row` are one-based, counted inside the panel, as a terminal
+/// reports them.
+#[must_use]
+pub fn encode_wheel(up: bool, column: u16, row: u16, encoding: MouseEncoding) -> Vec<u8> {
+    let button = if up { WHEEL_UP } else { WHEEL_DOWN };
+    match encoding {
+        MouseEncoding::Sgr => format!("\x1b[<{button};{column};{row}M").into_bytes(),
+        MouseEncoding::Default => {
+            // Every field is offset by 32, and one byte holds each, so a coordinate
+            // past 223 has no encoding and the event is dropped by the child.
+            let mut v = b"\x1b[M".to_vec();
+            v.push(32 + button);
+            v.push(u8::try_from(column.saturating_add(32)).unwrap_or(u8::MAX));
+            v.push(u8::try_from(row.saturating_add(32)).unwrap_or(u8::MAX));
+            v
+        }
+    }
+}
+
 /// Wraps pasted text so the child receives it as one block, not as many keystrokes.
 #[must_use]
 pub fn encode_paste(text: &str) -> Vec<u8> {
@@ -226,6 +260,26 @@ mod tests {
         assert_eq!(
             host_action(&key(KeyCode::Char('0'), KeyModifiers::NONE)),
             None
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_is_encoded_for_a_child_that_asked_for_it() {
+        assert_eq!(
+            encode_wheel(true, 5, 3, MouseEncoding::Sgr),
+            b"\x1b[<64;5;3M".to_vec()
+        );
+        assert_eq!(
+            encode_wheel(false, 5, 3, MouseEncoding::Sgr),
+            b"\x1b[<65;5;3M".to_vec()
+        );
+    }
+
+    #[test]
+    fn the_default_encoding_offsets_every_field_by_thirty_two() {
+        assert_eq!(
+            encode_wheel(true, 1, 1, MouseEncoding::Default),
+            vec![0x1b, b'[', b'M', 96, 33, 33]
         );
     }
 

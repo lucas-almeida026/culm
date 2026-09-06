@@ -24,7 +24,7 @@ culm project rm <project>          # unregister it; never deletes source or bran
 
 Inside the interface: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+X` deletes a paused one, `Alt+Shift+D` toggles nerd mode, `Ctrl+q` quits. A click focuses any row, and the separator drags to resize the sidebar.
 
-The mouse wheel over a panel scrolls its output, and so do `Shift+PageUp` and `Shift+PageDown`. Typing returns the view to the live output.
+The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
 
 ## Build
 

@@ -103,11 +103,17 @@ script rather than by hand. Each line states what was asserted.
 | A child that exits | A shell that ends is replaced at position 0 on the next tick. |
 | Pause, save, and restore | Closing a project and reopening it restarts every active session with `--resume` and the same session id. |
 | Project removal | A confirmed `culm project rm --recursive` left every source file, branch, and repository in place. |
+| Mouse events forwarded to the child | A child that turns on `?1000h` and `?1006h` receives a wheel notch as `ESC [ < 64 ; col ; row M`, with the panel border as the origin. |
+
+A child that asks for mouse reporting owns its own scrolling, and Claude Code is one.
+Nothing scrolls off its panel, so `vt100` accumulates no scrollback for it, and the
+wheel has to reach the child instead. `vt100` also keeps no scrollback while a scroll
+region is active (`grid.rs`, the push into `scrollback` is guarded by
+`!scroll_region_active()`).
 
 ## Not verified
 
 - The kitty keyboard protocol path.
-- Mouse events forwarded to the child.
 - Images in a panel.
 - Scrollback and the wheel under a real terminal driven by hand, rather than by a script.
 - Any terminal other than kitty, and any platform other than Linux.

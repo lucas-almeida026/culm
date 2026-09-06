@@ -1286,3 +1286,61 @@ fn the_wheel_does_nothing_while_a_form_is_open() {
 
     assert_eq!(scrollback_of(&app), 0);
 }
+
+/// Output that turns on mouse reporting with the SGR encoding, the way Claude Code
+/// does, followed by ordinary lines.
+fn mouse_grabbing_output() -> Vec<u8> {
+    let mut v = b"\x1b[?1000h\x1b[?1006h".to_vec();
+    v.extend(numbered_lines());
+    v
+}
+
+#[test]
+fn the_wheel_goes_to_a_child_that_asked_for_the_mouse() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+    assert_eq!(
+        pty.written_utf8(),
+        "\x1b[<64;10;5M",
+        "the notch reaches the child, which owns its own history"
+    );
+    assert_eq!(
+        scrollback_of(&app),
+        0,
+        "culm does not also move its own scrollback"
+    );
+}
+
+#[test]
+fn the_wheel_down_reaches_the_child_as_the_other_button() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+
+    app.on_mouse(MouseEventKind::ScrollDown, 31, 1, &hit);
+
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+    assert_eq!(
+        pty.written_utf8(),
+        "\x1b[<65;1;1M",
+        "the panel border is the origin"
+    );
+}
+
+#[test]
+fn the_wheel_still_scrolls_culm_when_the_child_wants_no_mouse() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+    assert_eq!(pty.written_utf8(), "", "a shell gets no mouse bytes");
+    assert_eq!(scrollback_of(&app), 3);
+}

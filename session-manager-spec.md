@@ -166,54 +166,60 @@ The model for the interface is a micro-frontend host. Each session behaves as a 
 
 ### Scrollback
 
-74. Hold the output of every session in a scrollback buffer, and let the user look back through it.
-75. Scroll the visible panel with the mouse wheel over the panel. Leave the wheel over the sidebar alone.
-76. Scroll half a panel with `Shift+PageUp` and `Shift+PageDown`. Leave plain `PageUp` and `PageDown` to the child.
-77. Return the view to the live output on the first keystroke the user sends, as a terminal does.
-78. Hold the view still while output arrives, so that a busy session never drags the view.
-79. Show the offset in the panel title while the view sits above the live output, so that a held panel never reads as a stalled session.
-80. Scroll nothing while a form is open.
+74. Forward a wheel notch to a child that asked for mouse reporting, and let that child scroll its own history. Claude Code asks for it, and holds the conversation itself.
+75. Hold the output of a child that asked for no mouse reporting in a scrollback buffer, and let the user look back through it. A shell is such a child.
+76. Scroll with the mouse wheel over the panel. Leave the wheel over the sidebar alone.
+77. Scroll half a panel with `Shift+PageUp` and `Shift+PageDown`. Leave plain `PageUp` and `PageDown` to the child.
+78. Return the view to the live output on the first keystroke the user sends, as a terminal does.
+79. Hold the view still while output arrives, so that a busy session never drags the view.
+80. Show the offset in the panel title while the view sits above the live output, so that a held panel never reads as a stalled session.
+81. Scroll nothing while a form is open.
+
+A child that paints its own viewport never lets a line scroll off the panel, so no
+scrollback accumulates for it and culm has nothing of its own to show. `vt100` also
+keeps no scrollback while a scroll region is active, in `grid.rs`. Requirement 74 is
+what makes such a session scrollable, and requirements 75 to 80 cover the rest.
 
 ### Keys
 
 Every reserved key stops belonging to the Claude Code process. Keep the reserved set small.
 
-81. Use `Alt` as the only leader. Reserve no function key.
-82. Reserve `Ctrl+q` for quit.
-83. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
-84. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
-85. Create a session with `Alt+Shift+N`. A new session starts active.
-86. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
-87. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
-88. Never swap position 0. The shell keeps that position for the life of the project.
-89. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
-90. Toggle nerd mode with `Alt+Shift+D`.
-91. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 29 reaches the user.
-92. Address the active half with a digit. Reach a paused session with a mouse click.
-93. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
+82. Use `Alt` as the only leader. Reserve no function key.
+83. Reserve `Ctrl+q` for quit.
+84. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
+85. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
+86. Create a session with `Alt+Shift+N`. A new session starts active.
+87. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
+88. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
+89. Never swap position 0. The shell keeps that position for the life of the project.
+90. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
+91. Toggle nerd mode with `Alt+Shift+D`.
+92. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 29 reaches the user.
+93. Address the active half with a digit. Reach a paused session with a mouse click.
+94. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
 
 ### Configuration
 
-94. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
-95. Hold every key binding in the configuration file. Ship the defaults in the binary.
-96. Override one binding without restating the rest.
-97. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
-98. Read the nerd mode default from the same file.
+95. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
+96. Hold every key binding in the configuration file. Ship the defaults in the binary.
+97. Override one binding without restating the rest.
+98. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
+99. Read the nerd mode default from the same file.
 
 ### Statistics
 
-99. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
-100. Sample memory once per second. Render the last sample.
-101. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
-102. Reach `/proc` through a trait, so that a test supplies a fake.
+100. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
+101. Sample memory once per second. Render the last sample.
+102. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
+103. Reach `/proc` through a trait, so that a test supplies a fake.
 
 One Claude Code process measured about 436 MB of resident memory on 2026-09-02. Memory, and not render cost, is the limit on the session count.
 
 ### Persistence
 
-103. On closing a project, pause every session and record which sessions were active.
-104. On opening a project, restore both halves of the session list to the recorded state.
-105. Survive a reboot through the saved state, because a reboot ends every terminal process.
+104. On closing a project, pause every session and record which sessions were active.
+105. On opening a project, restore both halves of the session list to the recorded state.
+106. Survive a reboot through the saved state, because a reboot ends every terminal process.
 
 ## Out of scope
 

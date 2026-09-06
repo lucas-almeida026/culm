@@ -134,6 +134,28 @@ impl Session {
         Ok(())
     }
 
+    /// The encoding the child asked mouse events to arrive in, or `None` when the
+    /// child wants no mouse events.
+    ///
+    /// A child that takes the mouse owns its own scrolling, so culm forwards the
+    /// wheel instead of moving its own scrollback. Claude Code is such a child.
+    #[must_use]
+    pub fn mouse_encoding(&self) -> Option<crate::keys::MouseEncoding> {
+        let parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        if parser.screen().mouse_protocol_mode() == vt100::MouseProtocolMode::None {
+            return None;
+        }
+        Some(match parser.screen().mouse_protocol_encoding() {
+            vt100::MouseProtocolEncoding::Sgr => crate::keys::MouseEncoding::Sgr,
+            // The UTF-8 encoding is rare, and its coordinates agree with the default
+            // encoding below column 96, so the default carries it.
+            _ => crate::keys::MouseEncoding::Default,
+        })
+    }
+
     /// Moves the view back through the scrollback. A positive count goes up.
     ///
     /// `vt100` clamps to the real length of the scrollback, and it raises the offset

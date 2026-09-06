@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 
 use crate::git::Git;
 use crate::hooks::{Attention, HookEvent};
@@ -446,6 +446,42 @@ impl App {
         self.entries.get(self.entry_focus)?.live.as_ref()
     }
 
+    fn focused_session_mut(&mut self) -> Option<&mut Session> {
+        if self.shell_focused {
+            return self.shell.as_mut();
+        }
+        self.entries.get_mut(self.entry_focus)?.live.as_mut()
+    }
+
+    /// One notch of the wheel over the panel.
+    ///
+    /// A child that asked for mouse reporting scrolls its own history, so the notch
+    /// goes to the child. Claude Code is such a child, and its own scrollback is the
+    /// conversation. A child that wants no mouse, such as a shell, leaves culm to
+    /// move its scrollback instead.
+    fn wheel(&mut self, up: bool, column: u16, row: u16, panel: Rect) {
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(session) = self.focused_session_mut() else {
+            return;
+        };
+        match session.mouse_encoding() {
+            Some(encoding) => {
+                // The panel border sits outside the child, and a terminal counts from
+                // one, so the border column and row become the origin.
+                let bytes = crate::keys::encode_wheel(
+                    up,
+                    column.saturating_sub(panel.x),
+                    row.saturating_sub(panel.y),
+                    encoding,
+                );
+                let _ = session.send(&bytes);
+            }
+            None => session.scroll_by(if up { WHEEL_LINES } else { -WHEEL_LINES }),
+        }
+    }
+
     /// Moves the visible panel through its scrollback. A positive count goes up.
     fn scroll_focus(&mut self, lines: i32) {
         if self.modal.is_some() {
@@ -811,10 +847,10 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => self.dragging = false,
             MouseEventKind::ScrollUp if hit.panel.contains(Position { x: column, y: row }) => {
-                self.scroll_focus(WHEEL_LINES);
+                self.wheel(true, column, row, hit.panel);
             }
             MouseEventKind::ScrollDown if hit.panel.contains(Position { x: column, y: row }) => {
-                self.scroll_focus(-WHEEL_LINES);
+                self.wheel(false, column, row, hit.panel);
             }
             _ => {}
         }
