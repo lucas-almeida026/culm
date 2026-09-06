@@ -1140,3 +1140,149 @@ fn rm_refuses_an_unknown_project() {
     );
     assert!(result.is_err());
 }
+
+/// Two hundred numbered lines, enough to fill a small panel and its scrollback.
+fn numbered_lines() -> Vec<u8> {
+    (0..200)
+        .map(|n| format!("line-{n:03}\r\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn panel_hit() -> HitBox {
+    HitBox {
+        sidebar_width: 30,
+        separator_col: 29,
+        rows: Vec::new(),
+        panel: Rect::new(30, 0, 50, 10),
+    }
+}
+
+/// A session filled with `numbered_lines`, on a panel small enough to scroll.
+fn scrolled_session(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    app.resize_all(6, 40).expect("resize succeeds");
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let session = app.entries()[0].live.as_ref().expect("one is live");
+    assert!(
+        session.wait_for_text("line-199", Duration::from_secs(1)),
+        "the session drained its output"
+    );
+    app
+}
+
+fn scrollback_of(app: &App) -> usize {
+    app.entries()[0]
+        .live
+        .as_ref()
+        .expect("one is live")
+        .scrollback()
+}
+
+fn screen_of(app: &App) -> String {
+    app.entries()[0]
+        .live
+        .as_ref()
+        .expect("one is live")
+        .screen_text()
+}
+
+#[test]
+fn the_wheel_scrolls_the_visible_session_back() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+    assert!(screen_of(&app).contains("line-199"));
+
+    for _ in 0..4 {
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    }
+
+    assert_eq!(scrollback_of(&app), 12, "three lines per notch");
+    assert!(
+        !screen_of(&app).contains("line-199"),
+        "the view is held above the live output"
+    );
+
+    for _ in 0..4 {
+        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit);
+    }
+    assert_eq!(scrollback_of(&app), 0);
+    assert!(screen_of(&app).contains("line-199"));
+}
+
+#[test]
+fn a_keystroke_snaps_the_session_back_to_the_bottom() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+    for _ in 0..4 {
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    }
+    assert!(scrollback_of(&app) > 0);
+
+    app.on_key(&key(KeyCode::Char('h'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is forwarded");
+
+    assert_eq!(scrollback_of(&app), 0, "typing returns to the live output");
+    assert!(screen_of(&app).contains("line-199"));
+}
+
+#[test]
+fn the_wheel_over_the_sidebar_scrolls_nothing() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+
+    app.on_mouse(MouseEventKind::ScrollUp, 5, 3, &hit);
+
+    assert_eq!(scrollback_of(&app), 0, "the wheel belongs to the panel");
+}
+
+#[test]
+fn shift_page_up_scrolls_half_a_panel() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+
+    app.on_key(&key(KeyCode::PageUp, KeyModifiers::SHIFT), &f.deps())
+        .expect("the host key is handled");
+
+    assert_eq!(scrollback_of(&app), 3, "half of a six row panel");
+    app.on_key(&key(KeyCode::PageDown, KeyModifiers::SHIFT), &f.deps())
+        .expect("the host key is handled");
+    assert_eq!(scrollback_of(&app), 0);
+}
+
+#[test]
+fn scrolling_stops_at_both_ends_of_the_buffer() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+
+    for _ in 0..200 {
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    }
+    let top = scrollback_of(&app);
+    assert!(top > 0, "the buffer holds history");
+    assert!(top < 600, "the view stops at the oldest line it kept");
+    assert!(screen_of(&app).contains("line-000"));
+
+    for _ in 0..500 {
+        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit);
+    }
+    assert_eq!(scrollback_of(&app), 0, "the view stops at the live output");
+}
+
+#[test]
+fn the_wheel_does_nothing_while_a_form_is_open() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+    let hit = panel_hit();
+    app.on_key(&key(KeyCode::Char('N'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+
+    assert_eq!(scrollback_of(&app), 0);
+}

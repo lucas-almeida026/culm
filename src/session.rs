@@ -134,6 +134,40 @@ impl Session {
         Ok(())
     }
 
+    /// Moves the view back through the scrollback. A positive count goes up.
+    ///
+    /// `vt100` clamps to the real length of the scrollback, and it raises the offset
+    /// when a new line arrives while the view is held back, so output from the child
+    /// never drags the view.
+    pub fn scroll_by(&self, lines: i32) {
+        let mut parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        let current = parser.screen().scrollback();
+        parser
+            .screen_mut()
+            .set_scrollback(current.saturating_add_signed(lines as isize));
+    }
+
+    /// Returns the view to the live output, as a terminal does when the user types.
+    pub fn scroll_to_bottom(&self) {
+        let mut parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        parser.screen_mut().set_scrollback(0);
+    }
+
+    /// How many lines the view sits above the live output. Zero means live.
+    #[must_use]
+    pub fn scrollback(&self) -> usize {
+        match self.parser.lock() {
+            Ok(p) => p.screen().scrollback(),
+            Err(e) => e.into_inner().screen().scrollback(),
+        }
+    }
+
     /// The visible screen as plain text. Tests read this instead of a terminal.
     #[must_use]
     pub fn screen_text(&self) -> String {

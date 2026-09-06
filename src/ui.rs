@@ -226,7 +226,7 @@ fn truncate(text: &str, room: usize) -> String {
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     if app.focus() == Focus::Shell {
         match app.shell() {
-            Some(shell) => draw_terminal(f, shell, " shell ".to_string(), area),
+            Some(shell) => draw_terminal(f, shell, title_of("shell", shell), area),
             None => f.render_widget(
                 Paragraph::new("no shell")
                     .style(Style::default().fg(Color::DarkGray))
@@ -255,7 +255,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let title = format!(" {} ", entry.name());
     match entry.live.as_ref() {
-        Some(session) => draw_terminal(f, session, title, area),
+        Some(session) => draw_terminal(f, session, title_of(entry.name(), session), area),
         None => {
             f.render_widget(
                 Paragraph::new("paused\n\nAlt+Shift+P resumes this session.")
@@ -366,6 +366,15 @@ fn draw_form(f: &mut Frame, app: &App, form: &crate::app::NewSession, panel: Rec
         Paragraph::new(lines).block(Block::bordered().title(" new session ")),
         area,
     );
+}
+
+/// The panel title, with an arrow when the view sits above the live output, so that
+/// a held-back panel never looks like a stalled session.
+fn title_of(name: &str, session: &crate::session::Session) -> String {
+    match session.scrollback() {
+        0 => format!(" {name} "),
+        n => format!(" {name}  ↑{n} "),
+    }
 }
 
 fn draw_terminal(f: &mut Frame, session: &crate::session::Session, title: String, area: Rect) {

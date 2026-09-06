@@ -2,7 +2,9 @@
 //!
 //! Two rules govern this module:
 //! 1. The host reserves as few keys as possible. Everything else belongs to the child.
-//! 2. `Alt` is the only leader. No function key is reserved.
+//! 2. `Alt` is the only leader. No function key is reserved. The one exception is
+//!    `Shift+PageUp` and `Shift+PageDown`, which every terminal reserves for its own
+//!    scrollback, and which Claude Code does not use.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -15,6 +17,8 @@ pub enum HostAction {
     NewSession,
     TogglePause,
     DeleteSession,
+    ScrollUp,
+    ScrollDown,
     NerdMode,
 }
 
@@ -28,10 +32,19 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('q') {
         return Some(HostAction::Quit);
     }
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    // Scrollback keeps the binding every terminal already uses for it. Plain
+    // `PageUp` and `PageDown` still belong to the child.
+    if shift {
+        match k.code {
+            KeyCode::PageUp => return Some(HostAction::ScrollUp),
+            KeyCode::PageDown => return Some(HostAction::ScrollDown),
+            _ => {}
+        }
+    }
     if !k.modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
-    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     match k.code {
         KeyCode::Char('0') => Some(HostAction::FocusShell),
         KeyCode::Char(c @ '1'..='9') => Some(HostAction::Focus(c as usize - '1' as usize)),
@@ -213,6 +226,31 @@ mod tests {
         assert_eq!(
             host_action(&key(KeyCode::Char('0'), KeyModifiers::NONE)),
             None
+        );
+    }
+
+    #[test]
+    fn shift_page_keys_scroll_the_session() {
+        assert_eq!(
+            host_action(&key(KeyCode::PageUp, KeyModifiers::SHIFT)),
+            Some(HostAction::ScrollUp)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::PageDown, KeyModifiers::SHIFT)),
+            Some(HostAction::ScrollDown)
+        );
+    }
+
+    #[test]
+    fn a_plain_page_key_belongs_to_the_session() {
+        assert_eq!(host_action(&key(KeyCode::PageUp, KeyModifiers::NONE)), None);
+        assert_eq!(
+            host_action(&key(KeyCode::PageDown, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            encode(&key(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(b"\x1b[5~".to_vec())
         );
     }
 

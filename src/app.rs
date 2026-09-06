@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
+use ratatui::layout::Position;
 
 use crate::git::Git;
 use crate::hooks::{Attention, HookEvent};
@@ -22,6 +23,9 @@ pub const MAX_ACTIVE: usize = 9;
 pub const SIDEBAR_MIN: u16 = 20;
 pub const SIDEBAR_MAX: u16 = 60;
 pub const SIDEBAR_DEFAULT: u16 = 30;
+
+/// Lines one notch of the wheel moves the view.
+const WHEEL_LINES: i32 = 3;
 
 /// How long a pause waits for a child to leave before it stops asking.
 const TERMINATE_GRACE: Duration = Duration::from_secs(3);
@@ -376,6 +380,9 @@ impl App {
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
             Some(HostAction::FocusShell) => self.focus_shell(),
             Some(HostAction::DeleteSession) => self.open_delete(),
+            // Half a panel, the step a pager uses.
+            Some(HostAction::ScrollUp) => self.scroll_focus(i32::from(self.rows / 2)),
+            Some(HostAction::ScrollDown) => self.scroll_focus(-i32::from(self.rows / 2)),
             None => {
                 if let Some(bytes) = crate::keys::encode(key) {
                     self.send_to_focus(&bytes)?;
@@ -412,6 +419,8 @@ impl App {
     fn send_to_focus(&mut self, bytes: &[u8]) -> Result<()> {
         if self.shell_focused {
             if let Some(shell) = self.shell.as_mut() {
+                // A terminal snaps back to the live output when the user types.
+                shell.scroll_to_bottom();
                 shell.send(bytes)?;
             }
             return Ok(());
@@ -423,9 +432,28 @@ impl App {
             entry.attention = Attention::None;
         }
         if let Some(session) = entry.live.as_mut() {
+            session.scroll_to_bottom();
             session.send(bytes)?;
         }
         Ok(())
+    }
+
+    /// The session behind the visible panel, whichever it is.
+    fn focused_session(&self) -> Option<&Session> {
+        if self.shell_focused {
+            return self.shell.as_ref();
+        }
+        self.entries.get(self.entry_focus)?.live.as_ref()
+    }
+
+    /// Moves the visible panel through its scrollback. A positive count goes up.
+    fn scroll_focus(&mut self, lines: i32) {
+        if self.modal.is_some() {
+            return;
+        }
+        if let Some(session) = self.focused_session() {
+            session.scroll_by(lines);
+        }
     }
 
     fn open_form(&mut self) {
@@ -782,6 +810,12 @@ impl App {
                 self.sidebar_width = column.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
             }
             MouseEventKind::Up(MouseButton::Left) => self.dragging = false,
+            MouseEventKind::ScrollUp if hit.panel.contains(Position { x: column, y: row }) => {
+                self.scroll_focus(WHEEL_LINES);
+            }
+            MouseEventKind::ScrollDown if hit.panel.contains(Position { x: column, y: row }) => {
+                self.scroll_focus(-WHEEL_LINES);
+            }
             _ => {}
         }
     }
