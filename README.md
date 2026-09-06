@@ -24,6 +24,8 @@ culm project rm <project>          # unregister it; never deletes source or bran
 
 Inside the interface: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+X` deletes a paused one, `Alt+Shift+D` toggles nerd mode, `Ctrl+q` quits. A click focuses any row, and the separator drags to resize the sidebar.
 
+The mouse wheel over a panel scrolls its output, and so do `Shift+PageUp` and `Shift+PageDown`. Typing returns the view to the live output.
+
 ## Build
 
 ```

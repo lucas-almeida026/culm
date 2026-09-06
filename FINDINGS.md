@@ -90,12 +90,24 @@ Mouse capture takes selection away from the host terminal while the application 
 - A daemon and client split stays open in [session-manager-spec.md](session-manager-spec.md). The spike runs as one process, so the spike tests no split.
 - Markers reach the interface through hooks. Without tmux, identify a session with an injected environment variable plus `CLAUDE_CODE_SESSION_ID`, and let the hook post to the culm socket. Hook processes inherit the environment, which was verified on 2026-09-02.
 
+## Checked through a scripted pseudoterminal
+
+Run on 2026-09-06 against the release binary, driving a real pseudoterminal from a
+script rather than by hand. Each line states what was asserted.
+
+| Behavior | Result |
+| --- | --- |
+| Scrollback with the wheel | Six notches over the panel hold the view above the live output, and the panel title shows the offset. |
+| Scrollback snaps back | A keystroke returns the view to the live output and clears the indicator. |
+| Output while held back | Output arriving during a held view leaves the view where it is. |
+| A child that exits | A shell that ends is replaced at position 0 on the next tick. |
+| Pause, save, and restore | Closing a project and reopening it restarts every active session with `--resume` and the same session id. |
+| Project removal | A confirmed `culm project rm --recursive` left every source file, branch, and repository in place. |
+
 ## Not verified
 
 - The kitty keyboard protocol path.
 - Mouse events forwarded to the child.
-- A child that exits or dies while the interface runs.
-- Scrollback navigation inside a panel.
 - Images in a panel.
-- Pause, save, and restore across a restart.
+- Scrollback and the wheel under a real terminal driven by hand, rather than by a script.
 - Any terminal other than kitty, and any platform other than Linux.

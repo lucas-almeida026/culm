@@ -141,9 +141,12 @@ Position 0 holds a plain terminal so that the user runs an ordinary command with
 58. Give each state an emoji and a color.
 59. Clear a marker only when the user resolves the issue. Do not clear a marker when the user focuses the session.
 60. Clear a permission marker on the first keystroke culm sends to that session, or on the next hook for that session, whichever comes first.
+61. Retire a done marker only on `UserPromptSubmit` or `SessionEnd`. A tool or a subagent that reports in after `Stop` leaves the marker standing, because the hooks of one event run in parallel and reach the socket out of order.
+62. Read `notification_type` before a notification moves a marker. Raise the permission marker for `permission_prompt`. Raise the answer marker for `elicitation_dialog`, `elicitation_url_dialog`, and `agent_needs_input`. Move nothing for any other kind.
+63. Move nothing for `idle_prompt`. A minute of silence is not a question, and `Stop` has already reported the session idle.
 
 No hook reports that the user answered a permission prompt. `permissionDecision` is a value a hook returns, not an event Claude Code emits, so `PermissionRequest` would otherwise hold the marker until `PostToolUse` lands after the approved tool finishes. Checked on 2026-09-06 against the changelog of the CLI version recorded in [FINDINGS.md](FINDINGS.md), and reproduced by hand: the marker stayed up for the whole time the model worked. The keystroke that answers the prompt is the only signal culm receives, and reading it uses no terminal output, so requirement 50 still holds.
-61. Clear a permission marker when the next hook for that session arrives. A declined permission fires no terminating hook, verified on 2026-09-02, so no other signal reports the decline.
+64. Clear a permission marker when the next hook for that session arrives. A declined permission fires no terminating hook, verified on 2026-09-02, so no other signal reports the decline.
 
 The culm process owns the socket. A session runs only while culm runs, so a hook fires only while the socket exists. An unexpected exit of culm loses a marker in flight, and ends the session that produced the marker.
 
@@ -151,56 +154,66 @@ The culm process owns the socket. A session runs only while culm runs, so a hook
 
 The model for the interface is a micro-frontend host. Each session behaves as a terminal that runs on its own. culm arranges those terminals and adds management on top.
 
-62. Render each session as a terminal panel inside the interface.
-63. Keep the focused panel interactive. Keyboard input reaches the Claude Code process in the focused panel.
-64. Render the whole terminal for the focused panel, not a summary and not a snapshot.
-65. Show one session at a time, in the manner of a browser with vertical tabs. A session that is not visible keeps running.
-66. Show the attention state of a session on the session list, without stealing focus.
-67. Forward a paste to the focused session as one bracketed block.
-68. Let the user copy text out of the focused panel. Mouse capture removes text selection in some terminals, so provide a binding that turns mouse capture off. In kitty, shift plus drag still selects, verified on 2026-09-06. No other terminal is verified.
-69. Show an empty state. With no project registered, show the command that registers a project. With no session in the open project, show the binding that creates a session.
-70. Run on a terminal that reports no keyboard enhancement. Show the active keyboard mode in the sidebar.
+65. Render each session as a terminal panel inside the interface.
+66. Keep the focused panel interactive. Keyboard input reaches the Claude Code process in the focused panel.
+67. Render the whole terminal for the focused panel, not a summary and not a snapshot.
+68. Show one session at a time, in the manner of a browser with vertical tabs. A session that is not visible keeps running.
+69. Show the attention state of a session on the session list, without stealing focus.
+70. Forward a paste to the focused session as one bracketed block.
+71. Let the user copy text out of the focused panel. Mouse capture removes text selection in some terminals, so provide a binding that turns mouse capture off. In kitty, shift plus drag still selects, verified on 2026-09-06. No other terminal is verified.
+72. Show an empty state. With no project registered, show the command that registers a project. With no session in the open project, show the binding that creates a session.
+73. Run on a terminal that reports no keyboard enhancement. Show the active keyboard mode in the sidebar.
+
+### Scrollback
+
+74. Hold the output of every session in a scrollback buffer, and let the user look back through it.
+75. Scroll the visible panel with the mouse wheel over the panel. Leave the wheel over the sidebar alone.
+76. Scroll half a panel with `Shift+PageUp` and `Shift+PageDown`. Leave plain `PageUp` and `PageDown` to the child.
+77. Return the view to the live output on the first keystroke the user sends, as a terminal does.
+78. Hold the view still while output arrives, so that a busy session never drags the view.
+79. Show the offset in the panel title while the view sits above the live output, so that a held panel never reads as a stalled session.
+80. Scroll nothing while a form is open.
 
 ### Keys
 
 Every reserved key stops belonging to the Claude Code process. Keep the reserved set small.
 
-71. Use `Alt` as the only leader. Reserve no function key.
-72. Reserve `Ctrl+q` for quit.
-73. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
-74. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
-75. Create a session with `Alt+Shift+N`. A new session starts active.
-76. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
-77. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
-78. Never swap position 0. The shell keeps that position for the life of the project.
-79. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
-80. Toggle nerd mode with `Alt+Shift+D`.
-81. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 29 reaches the user.
-82. Address the active half with a digit. Reach a paused session with a mouse click.
-83. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
+81. Use `Alt` as the only leader. Reserve no function key.
+82. Reserve `Ctrl+q` for quit.
+83. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
+84. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
+85. Create a session with `Alt+Shift+N`. A new session starts active.
+86. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
+87. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
+88. Never swap position 0. The shell keeps that position for the life of the project.
+89. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
+90. Toggle nerd mode with `Alt+Shift+D`.
+91. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 29 reaches the user.
+92. Address the active half with a digit. Reach a paused session with a mouse click.
+93. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
 
 ### Configuration
 
-84. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
-85. Hold every key binding in the configuration file. Ship the defaults in the binary.
-86. Override one binding without restating the rest.
-87. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
-88. Read the nerd mode default from the same file.
+94. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
+95. Hold every key binding in the configuration file. Ship the defaults in the binary.
+96. Override one binding without restating the rest.
+97. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
+98. Read the nerd mode default from the same file.
 
 ### Statistics
 
-89. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
-90. Sample memory once per second. Render the last sample.
-91. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
-92. Reach `/proc` through a trait, so that a test supplies a fake.
+99. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
+100. Sample memory once per second. Render the last sample.
+101. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
+102. Reach `/proc` through a trait, so that a test supplies a fake.
 
 One Claude Code process measured about 436 MB of resident memory on 2026-09-02. Memory, and not render cost, is the limit on the session count.
 
 ### Persistence
 
-93. On closing a project, pause every session and record which sessions were active.
-94. On opening a project, restore both halves of the session list to the recorded state.
-95. Survive a reboot through the saved state, because a reboot ends every terminal process.
+103. On closing a project, pause every session and record which sessions were active.
+104. On opening a project, restore both halves of the session list to the recorded state.
+105. Survive a reboot through the saved state, because a reboot ends every terminal process.
 
 ## Out of scope
 
