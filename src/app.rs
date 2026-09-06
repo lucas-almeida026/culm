@@ -62,6 +62,14 @@ impl Entry {
     }
 }
 
+/// What the interface is showing. The shell holds position 0 and owns no record, so
+/// it cannot be an index into `entries`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Shell,
+    Entry(usize),
+}
+
 /// Which field of the new-session form holds the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Field {
@@ -82,7 +90,12 @@ pub struct NewSession {
 pub struct App {
     project: Project,
     entries: Vec<Entry>,
-    focus: usize,
+    /// The shell at position 0. Not a Claude Code session: no record, no marker, no
+    /// transcript, and never saved.
+    shell: Option<Session>,
+    shell_rss: u64,
+    shell_focused: bool,
+    entry_focus: usize,
     quit: bool,
     sidebar_width: u16,
     dragging: bool,
@@ -101,7 +114,10 @@ impl App {
         Self {
             project,
             entries: Vec::new(),
-            focus: 0,
+            shell: None,
+            shell_rss: 0,
+            shell_focused: false,
+            entry_focus: 0,
             quit: false,
             sidebar_width: SIDEBAR_DEFAULT,
             dragging: false,
@@ -147,8 +163,22 @@ impl App {
             app.entries.push(entry);
         }
         app.reorder();
+        app.spawn_shell(deps);
+        app.shell_focused = app.shell.is_some();
         app.save(deps).ok();
         app
+    }
+
+    /// Starts the shell at the project root. The shell carries no `CULM_SOCKET`, so a
+    /// `claude` the user starts by hand there posts no marker culm cannot attribute.
+    fn spawn_shell(&mut self, deps: &Deps<'_>) {
+        let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let spec =
+            SessionSpec::new("shell", program, &self.project.root).with_size(self.rows, self.cols);
+        match Session::spawn(deps.spawner, &spec) {
+            Ok(session) => self.shell = Some(session),
+            Err(e) => self.status = format!("shell did not start: {e}"),
+        }
     }
 
     fn start(&self, record: &SessionRecord, deps: &Deps<'_>) -> Result<Session> {
@@ -198,8 +228,33 @@ impl App {
     }
 
     #[must_use]
-    pub fn focus(&self) -> usize {
-        self.focus
+    pub fn focus(&self) -> Focus {
+        if self.shell_focused {
+            Focus::Shell
+        } else {
+            Focus::Entry(self.entry_focus)
+        }
+    }
+
+    /// The focused session, or `None` while the shell holds the focus.
+    #[must_use]
+    pub fn focused_entry(&self) -> Option<usize> {
+        (!self.shell_focused).then_some(self.entry_focus)
+    }
+
+    #[must_use]
+    pub fn shell(&self) -> Option<&Session> {
+        self.shell.as_ref()
+    }
+
+    #[must_use]
+    pub fn shell_rss(&self) -> u64 {
+        self.shell_rss
+    }
+
+    /// Moves the focus to the shell. Position 0 never swaps and never pauses.
+    pub fn focus_shell(&mut self) {
+        self.shell_focused = true;
     }
 
     #[must_use]
@@ -249,13 +304,18 @@ impl App {
     /// Focuses a session. An index past the end leaves the focus unchanged.
     pub fn set_focus(&mut self, index: usize) {
         if index < self.entries.len() {
-            self.focus = index;
+            self.entry_focus = index;
+            self.shell_focused = false;
         }
     }
 
+    /// The focused session, or `None` while the shell holds the focus.
     #[must_use]
     pub fn visible(&self) -> Option<&Entry> {
-        self.entries.get(self.focus)
+        if self.shell_focused {
+            return None;
+        }
+        self.entries.get(self.entry_focus)
     }
 
     /// Applies a host action, feeds the form, or forwards the bytes to the visible
@@ -274,6 +334,7 @@ impl App {
             Some(HostAction::NewSession) => self.open_form(),
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
+            Some(HostAction::FocusShell) => self.focus_shell(),
             None => {
                 if let Some(bytes) = crate::keys::encode(key) {
                     self.send_to_focus(&bytes)?;
@@ -303,7 +364,13 @@ impl App {
     /// answers it is the only signal culm receives. A focus change sends no bytes and
     /// therefore still clears nothing.
     fn send_to_focus(&mut self, bytes: &[u8]) -> Result<()> {
-        let Some(entry) = self.entries.get_mut(self.focus) else {
+        if self.shell_focused {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.send(bytes)?;
+            }
+            return Ok(());
+        }
+        let Some(entry) = self.entries.get_mut(self.entry_focus) else {
             return Ok(());
         };
         if entry.attention == Attention::NeedsPermission {
@@ -433,20 +500,23 @@ impl App {
 
     fn focus_slug_of_last_active(&mut self) {
         if let Some(i) = self.entries.iter().rposition(Entry::is_active) {
-            self.focus = i;
+            self.entry_focus = i;
         }
     }
 
     /// Pauses the focused session, or resumes it when it is already paused.
     pub fn toggle_pause(&mut self, deps: &Deps<'_>) -> Result<()> {
-        let Some(entry) = self.entries.get(self.focus) else {
+        if self.shell_focused {
+            return Ok(());
+        }
+        let Some(entry) = self.entries.get(self.entry_focus) else {
             return Ok(());
         };
         let record = entry.record.clone();
         let running = entry.live.is_some();
 
         if running {
-            let Some(entry) = self.entries.get_mut(self.focus) else {
+            let Some(entry) = self.entries.get_mut(self.entry_focus) else {
                 return Ok(());
             };
             if let Some(mut session) = entry.live.take() {
@@ -465,7 +535,7 @@ impl App {
             }
             match self.start(&record, deps) {
                 Ok(session) => {
-                    let Some(entry) = self.entries.get_mut(self.focus) else {
+                    let Some(entry) = self.entries.get_mut(self.entry_focus) else {
                         return Ok(());
                     };
                     entry.record.started = true;
@@ -501,8 +571,29 @@ impl App {
             }
             entry.rss = session.pid().map_or(0, |pid| probe.rss_tree(pid));
         }
+
+        // Position 0 always holds a live shell, so an exited one is replaced here.
+        let restart = match self.shell.as_mut() {
+            Some(shell) => {
+                if shell.has_exited() {
+                    true
+                } else {
+                    self.shell_rss = shell.pid().map_or(0, |pid| probe.rss_tree(pid));
+                    false
+                }
+            }
+            None => true,
+        };
+        if restart {
+            self.shell = None;
+            self.shell_rss = 0;
+            self.spawn_shell(deps);
+        }
         if reaped {
-            let id = self.entries.get(self.focus).map(|e| e.record.id.clone());
+            let id = self
+                .entries
+                .get(self.entry_focus)
+                .map(|e| e.record.id.clone());
             self.reorder();
             if let Some(id) = id {
                 self.focus_id(&id);
@@ -545,6 +636,13 @@ impl App {
         for entry in &mut self.entries {
             entry.live = None;
         }
+        if let Some(shell) = self.shell.as_mut() {
+            shell.terminate().ok();
+            if !shell.wait_for_exit(TERMINATE_GRACE) {
+                shell.kill().ok();
+            }
+        }
+        self.shell = None;
         self.quit = true;
         self.save(deps)
     }
@@ -562,8 +660,10 @@ impl App {
                 self.dragging = true;
             }
             MouseEventKind::Down(MouseButton::Left) if column < hit.sidebar_width => {
-                if let Some((_, index)) = hit.rows.iter().find(|(r, _)| *r == row) {
-                    self.set_focus(*index);
+                match hit.rows.iter().find(|(r, _)| *r == row) {
+                    Some((_, Focus::Shell)) => self.focus_shell(),
+                    Some((_, Focus::Entry(index))) => self.set_focus(*index),
+                    None => {}
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
@@ -584,12 +684,18 @@ impl App {
                 session.resize(rows, cols)?;
             }
         }
+        if let Some(shell) = self.shell.as_mut() {
+            shell.resize(rows, cols)?;
+        }
         Ok(())
     }
 
     /// Active sessions first, paused sessions after, each half in its own order.
     fn reorder(&mut self) {
-        let focused = self.entries.get(self.focus).map(|e| e.record.id.clone());
+        let focused = self
+            .entries
+            .get(self.entry_focus)
+            .map(|e| e.record.id.clone());
         let mut active: Vec<Entry> = Vec::new();
         let mut paused: Vec<Entry> = Vec::new();
         for entry in self.entries.drain(..) {
@@ -604,14 +710,14 @@ impl App {
         if let Some(id) = focused {
             self.focus_id(&id);
         }
-        if self.focus >= self.entries.len() {
-            self.focus = self.entries.len().saturating_sub(1);
+        if self.entry_focus >= self.entries.len() {
+            self.entry_focus = self.entries.len().saturating_sub(1);
         }
     }
 
     fn focus_id(&mut self, id: &str) {
         if let Some(i) = self.entries.iter().position(|e| e.record.id == id) {
-            self.focus = i;
+            self.entry_focus = i;
         }
     }
 

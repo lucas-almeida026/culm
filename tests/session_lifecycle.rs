@@ -7,9 +7,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use culm::app::{App, Deps, Field, NewSession};
+use culm::app::{App, Deps, Field, Focus, NewSession};
 use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
+use culm::pty::SessionSpec;
 use culm::store::Store;
 use culm::testing::{FakeGit, FakeMemoryProbe, FakeSpawner, MemoryStore};
 use culm::ui::HitBox;
@@ -55,6 +56,15 @@ fn record(name: &str, state: SessionState) -> SessionRecord {
 
 fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, mods)
+}
+
+/// Every spawn except the shell at position 0, which is not a Claude Code session.
+fn session_specs(f: &Fakes) -> Vec<SessionSpec> {
+    f.spawner
+        .specs()
+        .into_iter()
+        .filter(|s| s.name != "shell")
+        .collect()
 }
 
 struct Fakes {
@@ -171,8 +181,9 @@ fn reopening_a_project_resumes_active_sessions_eagerly() {
 
     let app = App::open(saved, &f.deps(), 20, 60);
 
-    assert_eq!(f.spawner.count(), 2);
-    for spec in f.spawner.specs() {
+    let specs = session_specs(&f);
+    assert_eq!(specs.len(), 2);
+    for spec in specs {
         assert!(
             spec.has_flag("--resume", &format!("id-{}", spec.name)),
             "a session that ran before reloads its transcript"
@@ -192,7 +203,7 @@ fn paused_sessions_get_no_process_on_open() {
 
     let app = App::open(saved, &f.deps(), 20, 60);
 
-    assert_eq!(f.spawner.count(), 1, "only the active session starts");
+    assert_eq!(session_specs(&f).len(), 1, "only the active session starts");
     assert_eq!(app.active_count(), 1);
     assert!(app.entries()[0].live.is_some());
     assert!(app.entries()[1].live.is_none());
@@ -233,7 +244,11 @@ fn pause_sends_sigterm_and_moves_the_session_to_the_paused_half() {
     );
     assert_eq!(app.entries()[1].name(), "one");
     assert!(app.entries()[1].live.is_none());
-    assert_eq!(app.focus(), 1, "the focus follows the paused session");
+    assert_eq!(
+        app.focused_entry(),
+        Some(1),
+        "the focus follows the paused session"
+    );
 }
 
 #[test]
@@ -523,7 +538,7 @@ fn alt_digit_switches_the_visible_session() {
     app.on_key(&key(KeyCode::Char('2'), KeyModifiers::ALT), &f.deps())
         .expect("host key is handled");
 
-    assert_eq!(app.focus(), 1);
+    assert_eq!(app.focused_entry(), Some(1));
     assert_eq!(app.visible().map(culm::app::Entry::name), Some("two"));
 }
 
@@ -537,7 +552,7 @@ fn a_digit_past_the_active_half_leaves_the_focus_alone() {
     app.on_key(&key(KeyCode::Char('5'), KeyModifiers::ALT), &f.deps())
         .expect("host key is handled");
 
-    assert_eq!(app.focus(), 0);
+    assert_eq!(app.focused_entry(), Some(0));
 }
 
 #[test]
@@ -588,13 +603,13 @@ fn a_click_on_a_sidebar_row_switches_the_visible_session() {
     let hit = HitBox {
         sidebar_width: 30,
         separator_col: 29,
-        rows: vec![(2, 0), (3, 1)],
+        rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 2, &hit);
 
-    assert_eq!(app.focus(), 0);
+    assert_eq!(app.focused_entry(), Some(0));
 }
 
 #[test]
@@ -640,13 +655,13 @@ fn a_click_inside_the_panel_never_changes_the_focus() {
     let hit = HitBox {
         sidebar_width: 30,
         separator_col: 29,
-        rows: vec![(2, 0), (3, 1)],
+        rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 60, 2, &hit);
 
-    assert_eq!(app.focus(), 1);
+    assert_eq!(app.focused_entry(), Some(1));
 }
 
 #[test]
@@ -727,4 +742,151 @@ fn the_registry_and_the_project_survive_a_round_trip() {
         .expect("project loads")
         .expect("project exists");
     assert_eq!(project.repos.len(), 2);
+}
+
+#[test]
+fn the_shell_starts_at_the_project_root_and_holds_the_focus() {
+    let f = Fakes::new();
+    let app = App::open(project(), &f.deps(), 20, 60);
+
+    assert_eq!(app.focus(), Focus::Shell, "position 0 is focused on open");
+    assert!(app.focused_entry().is_none());
+    assert!(app.shell().is_some());
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert_eq!(shell.spec.cwd, PathBuf::from(ROOT));
+}
+
+#[test]
+fn the_shell_carries_no_culm_socket() {
+    let f = Fakes::new();
+    let _ = App::open(project(), &f.deps(), 20, 60);
+
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert!(
+        !shell.spec.env.iter().any(|(k, _)| k == "CULM_SOCKET"),
+        "a claude started by hand in the shell must post no marker culm cannot place"
+    );
+    assert!(shell.spec.args.is_empty());
+}
+
+#[test]
+fn the_shell_does_not_count_toward_the_nine_session_limit() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    for n in 1..=9 {
+        app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
+            .expect("session starts");
+    }
+
+    assert_eq!(app.active_count(), 9);
+    assert_eq!(session_specs(&f).len(), 9);
+    app.on_key(&key(KeyCode::Char('0'), KeyModifiers::ALT), &f.deps())
+        .expect("alt+0 is handled");
+    assert_eq!(app.focus(), Focus::Shell, "position 0 stays reachable");
+}
+
+#[test]
+fn a_shell_that_exits_is_restarted_on_the_next_tick() {
+    let f = Fakes::new();
+    let probe = FakeMemoryProbe::new(0);
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    f.spawner
+        .spawn_named("shell")
+        .expect("the shell spawned")
+        .child
+        .exit_on_its_own();
+
+    app.on_tick(&probe, &f.deps()).expect("tick succeeds");
+
+    assert!(
+        app.shell().is_some(),
+        "position 0 always holds a live shell"
+    );
+    assert_eq!(
+        f.spawner
+            .spawns()
+            .iter()
+            .filter(|s| s.spec.name == "shell")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn pause_does_nothing_while_the_shell_is_focused() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.focus_shell();
+
+    app.toggle_pause(&f.deps()).expect("the call succeeds");
+
+    assert_eq!(app.active_count(), 1, "the session is untouched");
+    assert_eq!(app.focus(), Focus::Shell);
+}
+
+#[test]
+fn keys_reach_the_shell_when_it_is_focused() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let session = f.spawner.spawn_named("one").expect("one spawned");
+    app.focus_shell();
+
+    app.on_key(&key(KeyCode::Char('l'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is forwarded");
+
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert_eq!(shell.pty.written_utf8(), "l");
+    assert_eq!(session.pty.written_utf8(), "", "no key reached the session");
+}
+
+#[test]
+fn the_shell_is_never_saved_to_the_project_file() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert_eq!(saved.sessions.len(), 1);
+    assert_eq!(saved.sessions[0].name, "one");
+}
+
+#[test]
+fn focusing_the_shell_keeps_the_place_in_the_session_list() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    app.set_focus(1);
+
+    app.focus_shell();
+    app.set_focus(1);
+
+    assert_eq!(app.focus(), Focus::Entry(1));
+}
+
+#[test]
+fn a_click_on_the_shell_row_focuses_the_shell() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let hit = HitBox {
+        sidebar_width: 30,
+        separator_col: 29,
+        rows: vec![(1, Focus::Shell), (4, Focus::Entry(0))],
+        panel: Rect::new(30, 0, 50, 20),
+    };
+
+    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 4, &hit);
+    assert_eq!(app.focus(), Focus::Entry(0));
+
+    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 1, &hit);
+    assert_eq!(app.focus(), Focus::Shell);
 }

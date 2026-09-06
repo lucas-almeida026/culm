@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, Entry, Field};
+use crate::app::{App, Entry, Field, Focus};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -19,8 +19,8 @@ pub struct HitBox {
     pub sidebar_width: u16,
     /// The column of the sidebar's right border. A drag starts here.
     pub separator_col: u16,
-    /// Screen row of each session row, and the entry it belongs to.
-    pub rows: Vec<(u16, usize)>,
+    /// Screen row of each sidebar row, and what it focuses.
+    pub rows: Vec<(u16, Focus)>,
     pub panel: Rect,
 }
 
@@ -70,10 +70,14 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
     }
 }
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, usize)> {
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, Focus)> {
     let inner_width = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut rows: Vec<(u16, usize)> = Vec::new();
+    let mut rows: Vec<(u16, Focus)> = Vec::new();
+
+    rows.push((area.y + 1 + lines.len() as u16, Focus::Shell));
+    lines.push(shell_line(app, inner_width));
+    lines.push(Line::from(""));
 
     lines.push(header("active"));
     let mut number = 0usize;
@@ -82,11 +86,11 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, usize)> {
             continue;
         }
         number += 1;
-        rows.push((area.y + 1 + lines.len() as u16, index));
+        rows.push((area.y + 1 + lines.len() as u16, Focus::Entry(index)));
         lines.push(entry_line(
             entry,
             Some(number),
-            index == app.focus(),
+            app.focus() == Focus::Entry(index),
             inner_width,
         ));
     }
@@ -102,8 +106,13 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, usize)> {
             continue;
         }
         paused += 1;
-        rows.push((area.y + 1 + lines.len() as u16, index));
-        lines.push(entry_line(entry, None, index == app.focus(), inner_width));
+        rows.push((area.y + 1 + lines.len() as u16, Focus::Entry(index)));
+        lines.push(entry_line(
+            entry,
+            None,
+            app.focus() == Focus::Entry(index),
+            inner_width,
+        ));
     }
     if paused == 0 {
         lines.push(dim("  none"));
@@ -114,6 +123,29 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, usize)> {
         area,
     );
     rows
+}
+
+/// Position 0. It carries no marker, so the prefix stays blank and the names below
+/// keep their alignment.
+fn shell_line(app: &App, inner_width: usize) -> Line<'static> {
+    let focused = app.focus() == Focus::Shell;
+    let base = if focused {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let rss = if app.shell_rss() > 0 {
+        format!("{} ", format_bytes(app.shell_rss()))
+    } else {
+        String::new()
+    };
+    let label = "   0 shell";
+    let pad = inner_width.saturating_sub(label.chars().count() + rss.chars().count());
+    Line::from(vec![
+        Span::styled(label.to_string(), base),
+        Span::styled(" ".repeat(pad), base),
+        Span::styled(rss, base),
+    ])
 }
 
 fn header(text: &str) -> Line<'static> {
@@ -190,6 +222,18 @@ fn truncate(text: &str, room: usize) -> String {
 }
 
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
+    if app.focus() == Focus::Shell {
+        match app.shell() {
+            Some(shell) => draw_terminal(f, shell, " shell ".to_string(), area),
+            None => f.render_widget(
+                Paragraph::new("no shell")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .block(Block::bordered().title(" shell ")),
+                area,
+            ),
+        }
+        return;
+    }
     let Some(entry) = app.visible() else {
         let hint = if app.project().repos.is_empty() {
             "no session yet.\n\nAlt+Shift+N creates one.\n\nthis project holds no repository. \
@@ -209,16 +253,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let title = format!(" {} ", entry.name());
     match entry.live.as_ref() {
-        Some(session) => {
-            let guard = match session.parser().lock() {
-                Ok(g) => g,
-                Err(e) => e.into_inner(),
-            };
-            f.render_widget(
-                PseudoTerminal::new(guard.screen()).block(Block::bordered().title(title)),
-                area,
-            );
-        }
+        Some(session) => draw_terminal(f, session, title, area),
         None => {
             f.render_widget(
                 Paragraph::new("paused\n\nAlt+Shift+P resumes this session.")
@@ -239,7 +274,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            " Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Ctrl+q quit",
+            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Ctrl+q quit",
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -327,6 +362,17 @@ fn draw_form(f: &mut Frame, app: &App, form: &crate::app::NewSession, panel: Rec
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" new session ")),
+        area,
+    );
+}
+
+fn draw_terminal(f: &mut Frame, session: &crate::session::Session, title: String, area: Rect) {
+    let guard = match session.parser().lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    f.render_widget(
+        PseudoTerminal::new(guard.screen()).block(Block::bordered().title(title)),
         area,
     );
 }

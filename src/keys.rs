@@ -11,6 +11,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum HostAction {
     Quit,
     Focus(usize),
+    FocusShell,
     NewSession,
     TogglePause,
     NerdMode,
@@ -31,6 +32,7 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
     }
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     match k.code {
+        KeyCode::Char('0') => Some(HostAction::FocusShell),
         KeyCode::Char(c @ '1'..='9') => Some(HostAction::Focus(c as usize - '1' as usize)),
         KeyCode::Char('N') => Some(HostAction::NewSession),
         KeyCode::Char('n') if shift => Some(HostAction::NewSession),
@@ -176,6 +178,22 @@ mod tests {
         );
         assert_eq!(
             host_action(&key(KeyCode::Char('p'), KeyModifiers::ALT)),
+            None
+        );
+    }
+
+    #[test]
+    fn alt_zero_reaches_the_shell() {
+        assert_eq!(
+            host_action(&key(KeyCode::Char('0'), KeyModifiers::ALT)),
+            Some(HostAction::FocusShell)
+        );
+    }
+
+    #[test]
+    fn a_bare_zero_belongs_to_the_session() {
+        assert_eq!(
+            host_action(&key(KeyCode::Char('0'), KeyModifiers::NONE)),
             None
         );
     }
