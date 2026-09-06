@@ -491,6 +491,36 @@ fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
 }
 
 #[test]
+fn a_late_tool_event_never_clears_a_done_marker() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let id = app.entries()[0].record.id.clone();
+    let hook = |name: &str| HookEvent {
+        session_id: id.clone(),
+        hook_event_name: name.into(),
+        ..Default::default()
+    };
+
+    app.on_hook(&hook("Stop"));
+    assert_eq!(app.entries()[0].attention, Attention::Done);
+
+    // A background subagent or a tool hook can reach the socket after Stop, because
+    // the hook processes of one event run in parallel.
+    app.on_hook(&hook("PostToolUse"));
+    app.on_hook(&hook("SubagentStop"));
+    assert_eq!(
+        app.entries()[0].attention,
+        Attention::Done,
+        "the done marker survives an event that arrives after the turn"
+    );
+
+    app.on_hook(&hook("UserPromptSubmit"));
+    assert_eq!(app.entries()[0].attention, Attention::None);
+}
+
+#[test]
 fn keys_reach_the_visible_session_only() {
     let f = Fakes::new();
     let mut app = App::new(project());

@@ -59,6 +59,9 @@ impl Attention {
     /// No event reports that the user answered a permission prompt, so a permission
     /// marker also clears on the keystroke that answers it. `App::send_to_focus`
     /// holds that half of the rule.
+    ///
+    /// A done marker retires only on `UserPromptSubmit` or `SessionEnd`, because a
+    /// background tool or subagent can report in after `Stop`.
     #[must_use]
     pub fn apply(self, event: &HookEvent) -> Self {
         let asking = event.tool_name.as_deref() == Some("AskUserQuestion");
@@ -68,10 +71,18 @@ impl Attention {
             "Notification" if self == Attention::NeedsPermission => self,
             "Notification" => Attention::NeedsAnswer,
             "PreToolUse" if asking => Attention::NeedsAnswer,
-            // A subagent that ends leaves the turn running, so the session is not done.
+            // A tool or a subagent that reports in after the turn ended must not wipe
+            // the done marker. Every hook of one event runs in parallel, and the
+            // `culm hook` processes race to the socket, so these arrive out of order.
             "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "SubagentStop"
-            | "UserPromptSubmit" | "SessionEnd" => Attention::None,
+                if self == Attention::Done =>
+            {
+                self
+            }
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "SubagentStop" => Attention::None,
             "Stop" => Attention::Done,
+            // Only the user moving on retires a done marker.
+            "UserPromptSubmit" | "SessionEnd" => Attention::None,
             _ => self,
         }
     }
@@ -345,6 +356,39 @@ mod tests {
                 "{name} is installed but never changes a marker"
             );
         }
+    }
+
+    #[test]
+    fn a_tool_event_after_stop_leaves_the_session_done() {
+        for name in [
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "SubagentStop",
+        ] {
+            assert_eq!(
+                Attention::Done.apply(&event(name)),
+                Attention::Done,
+                "{name} arriving after Stop must not wipe the done marker"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_user_moving_on_retires_a_done_marker() {
+        assert_eq!(
+            Attention::Done.apply(&event("UserPromptSubmit")),
+            Attention::None
+        );
+        assert_eq!(Attention::Done.apply(&event("SessionEnd")), Attention::None);
+    }
+
+    #[test]
+    fn a_permission_request_still_overrides_a_done_marker() {
+        assert_eq!(
+            Attention::Done.apply(&event("PermissionRequest")),
+            Attention::NeedsPermission
+        );
     }
 
     #[test]

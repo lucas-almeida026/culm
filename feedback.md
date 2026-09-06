@@ -1,4 +1,3 @@
-- option to delete the entire project and optionally its claude code transcripts (culm project rm)
-- after asked for permission and I gave permission (pressed 1 for "yes") they lock emoji continued to be shown in the TUI while the model was thinking/working, the emoji should be permission is granted
-- by default open a "normal" terminal at position 0, focused by default, where the user can run any terminal command, works normally, but can not be swap (can not swap position) Alt+0 or click focus it and the user input goes to it. opens by default inside the cwd of the project. if the user `cd` into another path that does not impact the running sessions or the project it self
-- add a shortcut to completely delete a session (only available when focusing a paused session)
+- the green check emoji that should show up once the model finishes the task is show by a split second and then is removed right after (seems to be related to the lock emoji change you did recently because before that it was working fine, that is, it is a regression)
+- I can't scroll the claude code session, I want to be able to
+- the question mark as show for the first time to be, as far as I know that indicates the AskUserQuestion tool was invoked, but there was no UI for me with the question and the options that usually show up in normal claude code sessions
