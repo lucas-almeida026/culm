@@ -4,8 +4,14 @@
 //! on its own, and all of them are fed by the same root system.
 
 pub mod app;
+pub mod cli;
+pub mod git;
+pub mod hooks;
 pub mod keys;
+pub mod project;
 pub mod pty;
 pub mod session;
+pub mod stats;
+pub mod store;
 pub mod testing;
 pub mod ui;

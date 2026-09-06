@@ -2,13 +2,13 @@
 //! the screen current.
 
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::pty::{Pty, PtySpawner, SessionSpec};
+use crate::pty::{Child, Pty, PtySpawner, SessionSpec};
 
 const SCROLLBACK: usize = 2000;
 
@@ -16,7 +16,9 @@ pub struct Session {
     name: String,
     parser: Arc<Mutex<vt100::Parser>>,
     pty: Box<dyn Pty>,
+    child: Box<dyn Child>,
     bytes: Arc<AtomicU64>,
+    eof: Arc<AtomicBool>,
     rows: u16,
     cols: u16,
 }
@@ -39,15 +41,18 @@ impl Session {
     /// The drain thread runs for every session, visible or not. An undrained
     /// pseudoterminal fills its buffer and the child blocks. See FINDINGS.md.
     pub fn spawn(spawner: &dyn PtySpawner, spec: &SessionSpec) -> Result<Self> {
-        let (pty, mut reader) = spawner.spawn(spec)?;
+        let spawned = spawner.spawn(spec)?;
+        let mut reader = spawned.reader;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
             spec.rows, spec.cols, SCROLLBACK,
         )));
         let bytes = Arc::new(AtomicU64::new(0));
+        let eof = Arc::new(AtomicBool::new(false));
 
         {
             let parser = Arc::clone(&parser);
             let bytes = Arc::clone(&bytes);
+            let eof = Arc::clone(&eof);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 while let Ok(n) = reader.read(&mut buf) {
@@ -59,14 +64,17 @@ impl Session {
                         p.process(&buf[..n]);
                     }
                 }
+                eof.store(true, Ordering::Relaxed);
             });
         }
 
         Ok(Self {
             name: spec.name.clone(),
             parser,
-            pty,
+            pty: spawned.pty,
+            child: spawned.child,
             bytes,
+            eof,
             rows: spec.rows,
             cols: spec.cols,
         })
@@ -83,8 +91,29 @@ impl Session {
     }
 
     #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.pid()
+    }
+
+    #[must_use]
     pub fn parser(&self) -> &Arc<Mutex<vt100::Parser>> {
         &self.parser
+    }
+
+    /// True once the child ended, by request or on its own. End of file on the
+    /// pseudoterminal is the first signal, and the child status confirms it.
+    pub fn has_exited(&mut self) -> bool {
+        self.eof.load(Ordering::Relaxed) || self.child.has_exited()
+    }
+
+    /// Asks the child to exit.
+    pub fn terminate(&mut self) -> Result<()> {
+        self.child.terminate()
+    }
+
+    /// Ends the child without asking.
+    pub fn kill(&mut self) -> Result<()> {
+        self.child.kill()
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
@@ -125,5 +154,17 @@ impl Session {
             std::thread::sleep(Duration::from_millis(2));
         }
         false
+    }
+
+    /// Waits until the child ends, or the timeout expires.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.has_exited() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.has_exited()
     }
 }

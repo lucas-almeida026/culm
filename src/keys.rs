@@ -2,7 +2,7 @@
 //!
 //! Two rules govern this module:
 //! 1. The host reserves as few keys as possible. Everything else belongs to the child.
-//! 2. A reserved binding never depends on ESC prefix fusion. See FINDINGS.md.
+//! 2. `Alt` is the only leader. No function key is reserved.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -11,25 +11,35 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum HostAction {
     Quit,
     Focus(usize),
+    NewSession,
+    TogglePause,
+    NerdMode,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
+///
+/// A shifted letter arrives as the uppercase character on every path, and the kitty
+/// protocol adds the shift modifier as well. Both forms are accepted, and the bare
+/// lowercase letter is left to the child.
 #[must_use]
 pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('q') {
         return Some(HostAction::Quit);
     }
-    if k.modifiers.contains(KeyModifiers::ALT)
-        && let KeyCode::Char(c @ '1'..='9') = k.code
-    {
-        return Some(HostAction::Focus(c as usize - '1' as usize));
+    if !k.modifiers.contains(KeyModifiers::ALT) {
+        return None;
     }
-    if let KeyCode::F(n @ 1..=9) = k.code
-        && k.modifiers.is_empty()
-    {
-        return Some(HostAction::Focus((n - 1) as usize));
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    match k.code {
+        KeyCode::Char(c @ '1'..='9') => Some(HostAction::Focus(c as usize - '1' as usize)),
+        KeyCode::Char('N') => Some(HostAction::NewSession),
+        KeyCode::Char('n') if shift => Some(HostAction::NewSession),
+        KeyCode::Char('P') => Some(HostAction::TogglePause),
+        KeyCode::Char('p') if shift => Some(HostAction::TogglePause),
+        KeyCode::Char('D') => Some(HostAction::NerdMode),
+        KeyCode::Char('d') if shift => Some(HostAction::NerdMode),
+        _ => None,
     }
-    None
 }
 
 /// Translates a key event into the bytes a terminal sends to a child process.
@@ -131,17 +141,50 @@ mod tests {
     }
 
     #[test]
-    fn function_key_focuses_the_same_session_as_the_alt_binding() {
+    fn control_q_quits() {
+        let action = host_action(&key(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(action, Some(HostAction::Quit));
+    }
+
+    #[test]
+    fn alt_shift_n_creates_a_session_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('N'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('n'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::NewSession));
+        assert_eq!(kitty, Some(HostAction::NewSession));
+    }
+
+    #[test]
+    fn alt_shift_p_toggles_the_pause_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('P'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('p'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::TogglePause));
+        assert_eq!(kitty, Some(HostAction::TogglePause));
+    }
+
+    #[test]
+    fn a_bare_alt_letter_belongs_to_the_session() {
         assert_eq!(
-            host_action(&key(KeyCode::F(2), KeyModifiers::NONE)),
-            host_action(&key(KeyCode::Char('2'), KeyModifiers::ALT))
+            host_action(&key(KeyCode::Char('n'), KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('p'), KeyModifiers::ALT)),
+            None
         );
     }
 
     #[test]
-    fn control_q_quits() {
-        let action = host_action(&key(KeyCode::Char('q'), KeyModifiers::CONTROL));
-        assert_eq!(action, Some(HostAction::Quit));
+    fn no_function_key_is_reserved() {
+        for n in 1..=12 {
+            assert_eq!(host_action(&key(KeyCode::F(n), KeyModifiers::NONE)), None);
+        }
     }
 
     #[test]

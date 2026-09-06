@@ -1,6 +1,6 @@
 # Findings — embedding Claude Code sessions in a Rust TUI
 
-Result of the spike defined in [SPIKE.md](SPIKE.md). Run on 2026-09-06. Feeds the build described in [../spm/session-manager-spec.md](../spm/session-manager-spec.md).
+Result of a spike run on 2026-09-06. Feeds the build described in [session-manager-spec.md](session-manager-spec.md).
 
 ## Verdict
 
@@ -56,15 +56,7 @@ Input is polled before the frame, so a keystroke never waits behind a render.
 
 ## Keyboard
 
-`Alt+1` in legacy mode is two bytes, `ESC` and `1`. crossterm fuses them into one `Alt+1` event only when both bytes arrive in the same read. Under load the pair splits, the child receives a bare `ESC`, which Claude Code treats as an interrupt, and the digit lands in the prompt. The failure is intermittent.
-
-Three defenses, in order:
-
-1. Push `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` when `supports_keyboard_enhancement()` returns true. Modified keys then arrive as one CSI-u event.
-2. Offer function keys as a second binding. One function key is one escape sequence, so it never depends on fusion.
-3. Offer a mouse click, which does not use the keyboard at all.
-
-Note that a query for keyboard enhancement returns false inside tmux, so the spike ran on the legacy path. **The kitty protocol path is unverified.** Run the binary directly in kitty to confirm the indicator in the sidebar turns green.
+A query for keyboard enhancement returns false inside tmux, so the spike ran on the legacy path. **The kitty protocol path is unverified.** Run the binary directly in kitty to confirm the indicator in the sidebar turns green.
 
 Verified key translations, from the focused panel to the child:
 
@@ -95,8 +87,8 @@ Mouse capture takes selection away from the host terminal while the application 
 - `tui-term` with the vt100 backend was enough. Move to `wezterm-term` or `alacritty_terminal` only for images, because vt100 models no image protocol.
 - Draw only the focused session. Parse every session. This is the whole performance strategy, and it is what keeps a background firehose cheap.
 - Keep the reserved key set small, and show the user which keyboard mode is active.
-- The daemon and client split from the specification is still the right shape for pause and restore. This spike runs as one process, so it does not test that.
-- Markers reach the interface through hooks. Without tmux, identify a session with an injected environment variable plus `CLAUDE_CODE_SESSION_ID`, and let the hook post to the daemon socket. Hook processes inherit the environment, which was verified on 2026-09-02.
+- A daemon and client split stays open in [session-manager-spec.md](session-manager-spec.md). The spike runs as one process, so the spike tests no split.
+- Markers reach the interface through hooks. Without tmux, identify a session with an injected environment variable plus `CLAUDE_CODE_SESSION_ID`, and let the hook post to the culm socket. Hook processes inherit the environment, which was verified on 2026-09-02.
 
 ## Not verified
 

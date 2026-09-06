@@ -110,4 +110,3 @@ These cost time once. `FINDINGS.md` holds the detail.
 - Drop the pseudoterminal slave right after spawning, or the master never reaches end of file.
 - Drain every session, always. An undrained pseudoterminal fills and the child blocks. The symptom looks like a hung background session.
 - Use the `ratatui::crossterm` re-export. A separate `crossterm` dependency risks a version skew.
-- A reserved key must not depend on ESC prefix fusion. `Alt+1` in legacy mode is two bytes, and a split delivers a bare `Esc` to the child, which Claude Code reads as an interrupt. Push the kitty keyboard protocol, and offer function keys and a mouse click as alternatives.
