@@ -177,6 +177,16 @@ pub fn worktree_dir(root: &Path, repo: &str, session_slug: &str) -> PathBuf {
         .join(format!("{repo}-{session_slug}"))
 }
 
+/// The directory name the Claude Code CLI gives a working directory under
+/// `~/.claude/projects`. Every `/` and every `.` becomes `-`.
+#[must_use]
+pub fn transcript_dir_name(cwd: &Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
 /// The system prompt addition that maps each repository to its worktree.
 ///
 /// This is convention only. Nothing enforces it, and a model decides whether to
@@ -260,6 +270,19 @@ mod tests {
         let mut r = Registry::default();
         assert_eq!(r.add("/a/spm").slug, "spm");
         assert_eq!(r.add("/b/spm").slug, "spm-2");
+    }
+
+    #[test]
+    fn transcript_dir_name_replaces_slashes_and_dots() {
+        assert_eq!(
+            transcript_dir_name(Path::new("/home/x/Documents/GitHub/culm")),
+            "-home-x-Documents-GitHub-culm"
+        );
+        assert_eq!(
+            transcript_dir_name(Path::new("/home/x/.config/i3")),
+            "-home-x--config-i3",
+            "a dot becomes a dash, so .config yields two dashes"
+        );
     }
 
     #[test]

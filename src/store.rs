@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::project::{Project, Registry};
+use crate::project::{Project, Registry, transcript_dir_name};
 
 /// The state culm keeps between runs, and the Claude Code settings it edits.
 pub trait Store: fmt::Debug {
@@ -18,6 +18,8 @@ pub trait Store: fmt::Debug {
     fn save_project(&self, project: &Project) -> Result<()>;
     fn read_claude_settings(&self) -> Result<Value>;
     fn write_claude_settings(&self, settings: &Value) -> Result<()>;
+    /// Removes the transcript of one session. Deletion has no undo.
+    fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()>;
 }
 
 /// Reads and writes real files under the state directory.
@@ -25,6 +27,7 @@ pub trait Store: fmt::Debug {
 pub struct FsStore {
     state_dir: PathBuf,
     claude_settings: PathBuf,
+    claude_projects: PathBuf,
 }
 
 impl FsStore {
@@ -40,14 +43,20 @@ impl FsStore {
         Ok(Self {
             state_dir,
             claude_settings: home.join(".claude/settings.json"),
+            claude_projects: home.join(".claude/projects"),
         })
     }
 
     #[must_use]
-    pub fn at(state_dir: impl Into<PathBuf>, claude_settings: impl Into<PathBuf>) -> Self {
+    pub fn at(
+        state_dir: impl Into<PathBuf>,
+        claude_settings: impl Into<PathBuf>,
+        claude_projects: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             state_dir: state_dir.into(),
             claude_settings: claude_settings.into(),
+            claude_projects: claude_projects.into(),
         }
     }
 
@@ -123,5 +132,90 @@ impl Store for FsStore {
 
     fn write_claude_settings(&self, settings: &Value) -> Result<()> {
         write_atomic(&self.claude_settings, &serde_json::to_vec_pretty(settings)?)
+    }
+
+    fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()> {
+        let path = self
+            .claude_projects
+            .join(transcript_dir_name(cwd))
+            .join(format!("{id}.jsonl"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            // A session that never wrote a turn has no transcript, and that is not a
+            // failure to delete it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Test code may use `expect` with a message. Library code may not.
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    /// A directory of its own per test, inside the system temporary directory.
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("culm-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn store_at(root: &Path) -> FsStore {
+        FsStore::at(
+            root.join("state"),
+            root.join("claude/settings.json"),
+            root.join("claude/projects"),
+        )
+    }
+
+    #[test]
+    fn remove_transcript_deletes_only_the_named_session() {
+        let root = temp_dir("transcripts");
+        let store = store_at(&root);
+        let cwd = Path::new("/home/x/spm/.worktrees/api-mate-feat-a");
+        let dir = root.join("claude/projects").join(transcript_dir_name(cwd));
+        std::fs::create_dir_all(&dir).expect("project dir");
+        let target = dir.join("keep-me-not.jsonl");
+        let sibling = dir.join("another-session.jsonl");
+        std::fs::write(&target, b"{}").expect("write");
+        std::fs::write(&sibling, b"{}").expect("write");
+
+        store
+            .remove_transcript(cwd, "keep-me-not")
+            .expect("remove succeeds");
+
+        assert!(!target.exists(), "the named transcript is gone");
+        assert!(
+            sibling.exists(),
+            "another session in the same directory survives"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn removing_a_transcript_that_never_existed_is_not_a_failure() {
+        let root = temp_dir("missing");
+        let store = store_at(&root);
+        store
+            .remove_transcript(Path::new("/home/x/spm"), "never-wrote-a-turn")
+            .expect("a session with no transcript still deletes");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_project_survives_a_round_trip_through_real_files() {
+        let root = temp_dir("roundtrip");
+        let store = store_at(&root);
+        let project = Project::new("spm", "/home/x/spm");
+        store.save_project(&project).expect("save");
+
+        let loaded = store.load_project("spm").expect("load").expect("exists");
+
+        assert_eq!(loaded, project);
+        assert!(store.load_project("absent").expect("load").is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

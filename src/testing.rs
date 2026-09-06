@@ -254,6 +254,7 @@ pub struct MemoryStore {
     projects: Arc<Mutex<std::collections::HashMap<String, crate::project::Project>>>,
     settings: Arc<Mutex<serde_json::Value>>,
     saves: Arc<std::sync::atomic::AtomicUsize>,
+    removed_transcripts: Arc<Mutex<Vec<(std::path::PathBuf, String)>>>,
 }
 
 impl Default for MemoryStore {
@@ -263,6 +264,7 @@ impl Default for MemoryStore {
             projects: Arc::new(Mutex::new(std::collections::HashMap::new())),
             settings: Arc::new(Mutex::new(serde_json::json!({}))),
             saves: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            removed_transcripts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -290,6 +292,12 @@ impl MemoryStore {
 
     pub fn put_settings(&self, settings: serde_json::Value) {
         *lock(&self.settings) = settings;
+    }
+
+    /// Every transcript culm asked to delete, as the working directory and the id.
+    #[must_use]
+    pub fn removed_transcripts(&self) -> Vec<(std::path::PathBuf, String)> {
+        lock(&self.removed_transcripts).clone()
     }
 }
 
@@ -319,6 +327,11 @@ impl crate::store::Store for MemoryStore {
 
     fn write_claude_settings(&self, settings: &serde_json::Value) -> Result<()> {
         *lock(&self.settings) = settings.clone();
+        Ok(())
+    }
+
+    fn remove_transcript(&self, cwd: &std::path::Path, id: &str) -> Result<()> {
+        lock(&self.removed_transcripts).push((cwd.to_path_buf(), id.to_string()));
         Ok(())
     }
 }

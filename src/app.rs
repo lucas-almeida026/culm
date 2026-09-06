@@ -86,6 +86,28 @@ pub struct NewSession {
     pub field: Field,
 }
 
+/// The delete confirmation. Deletion has no undo, so the user retypes the name.
+#[derive(Debug, Clone)]
+pub struct ConfirmDelete {
+    pub index: usize,
+    pub name: String,
+    pub typed: String,
+}
+
+impl ConfirmDelete {
+    #[must_use]
+    pub fn confirmed(&self) -> bool {
+        self.typed == self.name
+    }
+}
+
+/// The form on top of the panel, if any.
+#[derive(Debug, Clone)]
+pub enum Modal {
+    NewSession(NewSession),
+    ConfirmDelete(ConfirmDelete),
+}
+
 #[derive(Debug)]
 pub struct App {
     project: Project,
@@ -99,7 +121,7 @@ pub struct App {
     quit: bool,
     sidebar_width: u16,
     dragging: bool,
-    modal: Option<NewSession>,
+    modal: Option<Modal>,
     status: String,
     hooks_installed: bool,
     nerd_mode: bool,
@@ -268,8 +290,26 @@ impl App {
     }
 
     #[must_use]
-    pub fn modal(&self) -> Option<&NewSession> {
+    pub fn modal(&self) -> Option<&Modal> {
         self.modal.as_ref()
+    }
+
+    /// The new-session form, when that is the form on screen.
+    #[must_use]
+    pub fn new_session_form(&self) -> Option<&NewSession> {
+        match self.modal.as_ref() {
+            Some(Modal::NewSession(form)) => Some(form),
+            _ => None,
+        }
+    }
+
+    /// The delete confirmation, when that is the form on screen.
+    #[must_use]
+    pub fn confirm_delete(&self) -> Option<&ConfirmDelete> {
+        match self.modal.as_ref() {
+            Some(Modal::ConfirmDelete(confirm)) => Some(confirm),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -335,6 +375,7 @@ impl App {
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
             Some(HostAction::FocusShell) => self.focus_shell(),
+            Some(HostAction::DeleteSession) => self.open_delete(),
             None => {
                 if let Some(bytes) = crate::keys::encode(key) {
                     self.send_to_focus(&bytes)?;
@@ -346,13 +387,18 @@ impl App {
 
     /// Forwards a paste to the visible session as one bracketed block.
     pub fn on_paste(&mut self, text: &str) -> Result<()> {
-        if self.modal.is_some() {
-            if let Some(form) = self.modal.as_mut()
-                && form.field == Field::Name
-            {
-                form.name.push_str(text);
+        match self.modal.as_mut() {
+            Some(Modal::NewSession(form)) => {
+                if form.field == Field::Name {
+                    form.name.push_str(text);
+                }
+                return Ok(());
             }
-            return Ok(());
+            Some(Modal::ConfirmDelete(confirm)) => {
+                confirm.typed.push_str(text);
+                return Ok(());
+            }
+            None => {}
         }
         let bytes = crate::keys::encode_paste(text);
         self.send_to_focus(&bytes)
@@ -388,16 +434,82 @@ impl App {
             return;
         }
         self.status.clear();
-        self.modal = Some(NewSession {
+        self.modal = Some(Modal::NewSession(NewSession {
             name: String::new(),
             chosen: vec![false; self.project.repos.len()],
             field: Field::Name,
-        });
+        }));
+    }
+
+    /// Opens the delete confirmation. Offered only for a paused session, which is how
+    /// the refusal to delete a running session reaches the user.
+    fn open_delete(&mut self) {
+        let Some(index) = self.focused_entry() else {
+            return;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        if entry.live.is_some() {
+            self.status = format!("{} is running. pause it first.", entry.record.name);
+            return;
+        }
+        self.status.clear();
+        self.modal = Some(Modal::ConfirmDelete(ConfirmDelete {
+            index,
+            name: entry.record.name.clone(),
+            typed: String::new(),
+        }));
+    }
+
+    /// Removes the session and its transcript. Worktrees and branches are left alone.
+    pub fn delete_session(&mut self, index: usize, deps: &Deps<'_>) -> Result<()> {
+        let Some(entry) = self.entries.get(index) else {
+            return Ok(());
+        };
+        if entry.live.is_some() {
+            self.status = format!("{} is running. pause it first.", entry.record.name);
+            return Ok(());
+        }
+        let record = entry.record.clone();
+        deps.store.remove_transcript(&record.cwd, &record.id)?;
+        self.entries.remove(index);
+        if self.entry_focus >= self.entries.len() {
+            self.entry_focus = self.entries.len().saturating_sub(1);
+        }
+        self.status = if record.repos.is_empty() {
+            format!("{} deleted", record.name)
+        } else {
+            format!("{} deleted. its worktrees are still on disk.", record.name)
+        };
+        self.save(deps)
     }
 
     fn modal_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) -> Result<()> {
         use ratatui::crossterm::event::KeyCode;
-        let Some(form) = self.modal.as_mut() else {
+        match self.modal.as_mut() {
+            Some(Modal::ConfirmDelete(confirm)) => {
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Backspace => {
+                        confirm.typed.pop();
+                    }
+                    KeyCode::Char(c) => confirm.typed.push(c),
+                    KeyCode::Enter => {
+                        let confirm = confirm.clone();
+                        if confirm.confirmed() {
+                            self.modal = None;
+                            self.delete_session(confirm.index, deps)?;
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            Some(Modal::NewSession(_)) => {}
+            None => return Ok(()),
+        }
+        let Some(Modal::NewSession(form)) = self.modal.as_mut() else {
             return Ok(());
         };
         match key.code {

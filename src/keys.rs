@@ -14,6 +14,7 @@ pub enum HostAction {
     FocusShell,
     NewSession,
     TogglePause,
+    DeleteSession,
     NerdMode,
 }
 
@@ -38,6 +39,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('n') if shift => Some(HostAction::NewSession),
         KeyCode::Char('P') => Some(HostAction::TogglePause),
         KeyCode::Char('p') if shift => Some(HostAction::TogglePause),
+        KeyCode::Char('X') => Some(HostAction::DeleteSession),
+        KeyCode::Char('x') if shift => Some(HostAction::DeleteSession),
         KeyCode::Char('D') => Some(HostAction::NerdMode),
         KeyCode::Char('d') if shift => Some(HostAction::NerdMode),
         _ => None,
@@ -171,6 +174,17 @@ mod tests {
     }
 
     #[test]
+    fn alt_shift_x_deletes_a_session_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('X'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('x'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::DeleteSession));
+        assert_eq!(kitty, Some(HostAction::DeleteSession));
+    }
+
+    #[test]
     fn a_bare_alt_letter_belongs_to_the_session() {
         assert_eq!(
             host_action(&key(KeyCode::Char('n'), KeyModifiers::ALT)),
@@ -178,6 +192,10 @@ mod tests {
         );
         assert_eq!(
             host_action(&key(KeyCode::Char('p'), KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('x'), KeyModifiers::ALT)),
             None
         );
     }

@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, Entry, Field, Focus};
+use crate::app::{App, ConfirmDelete, Entry, Field, Focus, Modal};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -58,8 +58,10 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
     if app.nerd_mode() {
         draw_fps(f, app, panel);
     }
-    if let Some(form) = app.modal() {
-        draw_form(f, app, form, panel);
+    match app.modal() {
+        Some(Modal::NewSession(form)) => draw_form(f, app, form, panel),
+        Some(Modal::ConfirmDelete(confirm)) => draw_confirm(f, confirm, panel),
+        None => {}
     }
 
     HitBox {
@@ -274,7 +276,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Ctrl+q quit",
+            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+X delete   Ctrl+q quit",
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -373,6 +375,51 @@ fn draw_terminal(f: &mut Frame, session: &crate::session::Session, title: String
     };
     f.render_widget(
         PseudoTerminal::new(guard.screen()).block(Block::bordered().title(title)),
+        area,
+    );
+}
+
+/// Deletion has no undo, so the name must be retyped before `Enter` does anything.
+fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) {
+    let width = 60.min(panel.width.saturating_sub(2));
+    let height = 9.min(panel.height);
+    let area = Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let ready = confirm.confirmed();
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" delete {} and its transcript?", confirm.name),
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(""),
+        dim(" the worktrees and the branch stay on disk."),
+        dim(" this cannot be undone."),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(" type the name  "),
+            Span::styled(
+                format!("{} ", confirm.typed),
+                if ready {
+                    Style::default().fg(Color::Black).bg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                },
+            ),
+        ]),
+        Line::from(""),
+        dim(if ready {
+            " Enter deletes   Esc cancels"
+        } else {
+            " Esc cancels"
+        }),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" delete session ")),
         area,
     );
 }

@@ -570,7 +570,7 @@ fn keys_go_to_the_form_and_never_to_the_child_while_it_is_open() {
             .expect("the form takes the key");
     }
 
-    assert_eq!(app.modal().map(|m| m.name.as_str()), Some("hi"));
+    assert_eq!(app.new_session_form().map(|m| m.name.as_str()), Some("hi"));
     assert_eq!(pty.written_utf8(), "", "no key reached the child");
 }
 
@@ -587,7 +587,7 @@ fn the_form_toggles_a_repository_with_a_digit() {
         .expect("the repository toggles");
 
     assert_eq!(
-        app.modal().map(|m| m.chosen.clone()),
+        app.new_session_form().map(|m| m.chosen.clone()),
         Some(vec![false, true])
     );
 }
@@ -889,4 +889,125 @@ fn a_click_on_the_shell_row_focuses_the_shell() {
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 1, &hit);
     assert_eq!(app.focus(), Focus::Shell);
+}
+
+#[test]
+fn deleting_a_paused_session_removes_its_record_and_transcript() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("feat A", [true, false]), &f.deps())
+        .expect("one starts");
+    let record = app.entries()[0].record.clone();
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+
+    app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
+        .expect("the confirmation opens");
+    for c in "feat A".chars() {
+        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
+            .expect("the name is typed");
+    }
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("the delete runs");
+
+    assert!(app.entries().is_empty());
+    assert_eq!(
+        f.store.removed_transcripts(),
+        vec![(record.cwd.clone(), record.id.clone())]
+    );
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert!(saved.sessions.is_empty());
+}
+
+#[test]
+fn delete_leaves_the_worktree_and_the_branch_alone() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("feat A", [true, true]), &f.deps())
+        .expect("one starts");
+    let created = f.git.calls();
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+
+    app.delete_session(0, &f.deps()).expect("delete succeeds");
+
+    assert_eq!(
+        f.git.calls(),
+        created,
+        "git is not asked to remove anything"
+    );
+    assert!(app.status().contains("worktrees are still on disk"));
+}
+
+#[test]
+fn delete_is_refused_while_the_session_runs() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
+        .expect("the key is handled");
+
+    assert!(app.confirm_delete().is_none(), "no confirmation opens");
+    assert!(app.status().contains("pause it first"));
+
+    app.delete_session(0, &f.deps())
+        .expect("the direct call also refuses");
+    assert_eq!(app.entries().len(), 1);
+    assert!(f.store.removed_transcripts().is_empty());
+}
+
+#[test]
+fn the_wrong_name_deletes_nothing() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+
+    app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
+        .expect("the confirmation opens");
+    for c in "onx".chars() {
+        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
+            .expect("the name is typed");
+    }
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("enter is handled");
+
+    assert_eq!(app.entries().len(), 1, "the session survives");
+    assert!(f.store.removed_transcripts().is_empty());
+    assert!(app.confirm_delete().is_some(), "the form stays open");
+}
+
+#[test]
+fn cancelling_the_confirmation_deletes_nothing() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+
+    app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
+        .expect("the confirmation opens");
+    app.on_key(&key(KeyCode::Esc, KeyModifiers::NONE), &f.deps())
+        .expect("escape cancels");
+
+    assert!(app.confirm_delete().is_none());
+    assert_eq!(app.entries().len(), 1);
+    assert!(f.store.removed_transcripts().is_empty());
+}
+
+#[test]
+fn delete_does_nothing_while_the_shell_is_focused() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+    app.focus_shell();
+
+    app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
+        .expect("the key is handled");
+
+    assert!(app.confirm_delete().is_none());
+    assert_eq!(app.entries().len(), 1);
 }
