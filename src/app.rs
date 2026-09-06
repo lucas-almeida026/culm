@@ -275,10 +275,8 @@ impl App {
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
             None => {
-                if let Some(bytes) = crate::keys::encode(key)
-                    && let Some(s) = self.live_focus()
-                {
-                    s.send(&bytes)?;
+                if let Some(bytes) = crate::keys::encode(key) {
+                    self.send_to_focus(&bytes)?;
                 }
             }
         }
@@ -296,14 +294,25 @@ impl App {
             return Ok(());
         }
         let bytes = crate::keys::encode_paste(text);
-        if let Some(s) = self.live_focus() {
-            s.send(&bytes)?;
-        }
-        Ok(())
+        self.send_to_focus(&bytes)
     }
 
-    fn live_focus(&mut self) -> Option<&mut Session> {
-        self.entries.get_mut(self.focus)?.live.as_mut()
+    /// Forwards bytes to the visible session, and clears a permission marker.
+    ///
+    /// No hook fires when the user answers a permission prompt, so the keystroke that
+    /// answers it is the only signal culm receives. A focus change sends no bytes and
+    /// therefore still clears nothing.
+    fn send_to_focus(&mut self, bytes: &[u8]) -> Result<()> {
+        let Some(entry) = self.entries.get_mut(self.focus) else {
+            return Ok(());
+        };
+        if entry.attention == Attention::NeedsPermission {
+            entry.attention = Attention::None;
+        }
+        if let Some(session) = entry.live.as_mut() {
+            session.send(bytes)?;
+        }
+        Ok(())
     }
 
     fn open_form(&mut self) {

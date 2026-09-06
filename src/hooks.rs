@@ -16,12 +16,14 @@ use serde_json::{Value, json};
 
 /// The hook events culm installs. `PermissionRequest` reports a prompt, `Stop`
 /// reports the end of a turn, and the rest report that the session moved on.
-pub const EVENTS: [&str; 7] = [
+pub const EVENTS: [&str; 9] = [
     "PermissionRequest",
     "Notification",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "Stop",
+    "SubagentStop",
     "UserPromptSubmit",
     "SessionEnd",
 ];
@@ -53,6 +55,10 @@ impl Attention {
     ///
     /// A marker never clears because the user focused the session. A marker clears
     /// when a later event proves the session moved on.
+    ///
+    /// No event reports that the user answered a permission prompt, so a permission
+    /// marker also clears on the keystroke that answers it. `App::send_to_focus`
+    /// holds that half of the rule.
     #[must_use]
     pub fn apply(self, event: &HookEvent) -> Self {
         let asking = event.tool_name.as_deref() == Some("AskUserQuestion");
@@ -62,7 +68,9 @@ impl Attention {
             "Notification" if self == Attention::NeedsPermission => self,
             "Notification" => Attention::NeedsAnswer,
             "PreToolUse" if asking => Attention::NeedsAnswer,
-            "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "SessionEnd" => Attention::None,
+            // A subagent that ends leaves the turn running, so the session is not done.
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "SubagentStop"
+            | "UserPromptSubmit" | "SessionEnd" => Attention::None,
             "Stop" => Attention::Done,
             _ => self,
         }
@@ -302,6 +310,41 @@ mod tests {
         let done = Attention::None.apply(&event("Stop"));
         assert_eq!(done, Attention::Done);
         assert_eq!(done.apply(&event("UserPromptSubmit")), Attention::None);
+    }
+
+    #[test]
+    fn a_failed_tool_clears_a_stale_marker() {
+        assert_eq!(
+            Attention::NeedsPermission.apply(&event("PostToolUseFailure")),
+            Attention::None
+        );
+    }
+
+    #[test]
+    fn a_subagent_that_ends_leaves_the_session_not_done() {
+        assert_eq!(
+            Attention::NeedsAnswer.apply(&event("SubagentStop")),
+            Attention::None,
+            "the turn is still running, so the session is not done"
+        );
+    }
+
+    /// Guards against an event added to `EVENTS` and forgotten in `apply`, where it
+    /// would fall through to the catch-all and never move a marker.
+    #[test]
+    fn every_installed_event_moves_at_least_one_marker() {
+        let states = [
+            Attention::None,
+            Attention::Done,
+            Attention::NeedsAnswer,
+            Attention::NeedsPermission,
+        ];
+        for name in EVENTS {
+            assert!(
+                states.iter().any(|s| s.apply(&event(name)) != *s),
+                "{name} is installed but never changes a marker"
+            );
+        }
     }
 
     #[test]

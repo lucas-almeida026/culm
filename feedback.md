@@ -1,0 +1,4 @@
+- option to delete the entire project and optionally its claude code transcripts (culm project rm)
+- after asked for permission and I gave permission (pressed 1 for "yes") they lock emoji continued to be shown in the TUI while the model was thinking/working, the emoji should be permission is granted
+- by default open a "normal" terminal at position 0, focused by default, where the user can run any terminal command, works normally, but can not be swap (can not swap position) Alt+0 or click focus it and the user input goes to it. opens by default inside the cwd of the project. if the user `cd` into another path that does not impact the running sessions or the project it self
+- add a shortcut to completely delete a session (only available when focusing a paused session)

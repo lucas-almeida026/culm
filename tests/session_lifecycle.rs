@@ -372,6 +372,109 @@ fn focusing_a_session_never_clears_its_marker() {
 }
 
 #[test]
+fn answering_a_permission_prompt_clears_the_marker() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let id = app.entries()[0].record.id.clone();
+    app.on_hook(&HookEvent {
+        session_id: id,
+        hook_event_name: "PermissionRequest".into(),
+        tool_name: None,
+    });
+    assert_eq!(app.entries()[0].attention, Attention::NeedsPermission);
+
+    app.on_key(&key(KeyCode::Char('1'), KeyModifiers::NONE), &f.deps())
+        .expect("the answer is forwarded");
+
+    assert_eq!(
+        app.entries()[0].attention,
+        Attention::None,
+        "no hook reports an answered prompt, so the keystroke clears the marker"
+    );
+    let pty = f.spawner.last_pty().expect("a pty exists");
+    assert_eq!(
+        pty.written_utf8(),
+        "1",
+        "the answer still reaches the child"
+    );
+}
+
+#[test]
+fn a_key_sent_to_one_session_leaves_another_session_marked() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    for i in 0..2 {
+        let id = app.entries()[i].record.id.clone();
+        app.on_hook(&HookEvent {
+            session_id: id,
+            hook_event_name: "PermissionRequest".into(),
+            tool_name: None,
+        });
+    }
+    app.set_focus(0);
+
+    app.on_key(&key(KeyCode::Char('1'), KeyModifiers::NONE), &f.deps())
+        .expect("the answer is forwarded");
+
+    assert_eq!(app.entries()[0].attention, Attention::None);
+    assert_eq!(app.entries()[1].attention, Attention::NeedsPermission);
+}
+
+#[test]
+fn a_paste_also_answers_a_permission_prompt() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let id = app.entries()[0].record.id.clone();
+    app.on_hook(&HookEvent {
+        session_id: id,
+        hook_event_name: "PermissionRequest".into(),
+        tool_name: None,
+    });
+
+    app.on_paste("yes").expect("the paste is forwarded");
+
+    assert_eq!(app.entries()[0].attention, Attention::None);
+}
+
+#[test]
+fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let id = app.entries()[0].record.id.clone();
+    app.on_hook(&HookEvent {
+        session_id: id.clone(),
+        hook_event_name: "Stop".into(),
+        tool_name: None,
+    });
+
+    app.on_key(&key(KeyCode::Char('h'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is forwarded");
+
+    assert_eq!(
+        app.entries()[0].attention,
+        Attention::Done,
+        "only a permission marker answers to a keystroke"
+    );
+
+    app.on_hook(&HookEvent {
+        session_id: id,
+        hook_event_name: "UserPromptSubmit".into(),
+        tool_name: None,
+    });
+    assert_eq!(app.entries()[0].attention, Attention::None);
+}
+
+#[test]
 fn keys_reach_the_visible_session_only() {
     let f = Fakes::new();
     let mut app = App::new(project());
