@@ -187,6 +187,46 @@ pub fn transcript_dir_name(cwd: &Path) -> String {
         .collect()
 }
 
+/// Everything one `culm project rm` removes outside its own state file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Removal {
+    /// Directory names under `~/.claude/projects`.
+    pub claude_dirs: Vec<String>,
+    /// The repository each worktree belongs to, and the worktree itself.
+    pub worktrees: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Decides what a removal touches. Pure, so the destructive set is testable.
+///
+/// `claude_dirs` is the directory listing of `~/.claude/projects`. A directory
+/// belongs to the project when it is the root itself, or sits under the root. The
+/// separator is required, so `/home/x/spm2` never matches `/home/x/spm`.
+#[must_use]
+pub fn plan_removal(project: &Project, claude_dirs: &[String], recursive: bool) -> Removal {
+    let root = transcript_dir_name(&project.root);
+    let under_root = format!("{root}-");
+    let claude_dirs = claude_dirs
+        .iter()
+        .filter(|name| *name == &root || (recursive && name.starts_with(&under_root)))
+        .cloned()
+        .collect();
+
+    let mut worktrees = Vec::new();
+    if recursive {
+        for session in &project.sessions {
+            for repo in &session.repos {
+                if let Some(known) = project.repo(&repo.name) {
+                    worktrees.push((known.path.clone(), repo.worktree.clone()));
+                }
+            }
+        }
+    }
+    Removal {
+        claude_dirs,
+        worktrees,
+    }
+}
+
 /// The system prompt addition that maps each repository to its worktree.
 ///
 /// This is convention only. Nothing enforces it, and a model decides whether to
@@ -283,6 +323,75 @@ mod tests {
             "-home-x--config-i3",
             "a dot becomes a dash, so .config yields two dashes"
         );
+    }
+
+    fn project_with_a_session() -> Project {
+        let mut project = Project::new("spm", "/home/x/spm");
+        project.repos = vec![Repository {
+            name: "api-mate".into(),
+            path: PathBuf::from("/home/x/spm/api-mate"),
+        }];
+        project.sessions = vec![SessionRecord {
+            id: "id-1".into(),
+            name: "feat A".into(),
+            slug: "feat-a".into(),
+            state: SessionState::Paused,
+            cwd: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+            repos: vec![SessionRepo {
+                name: "api-mate".into(),
+                worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+                branch: "feat-a".into(),
+            }],
+            started: true,
+        }];
+        project
+    }
+
+    #[test]
+    fn a_plain_removal_takes_the_root_directory_only() {
+        let dirs = vec![
+            "-home-x-spm".to_string(),
+            "-home-x-spm--worktrees-api-mate-feat-a".to_string(),
+        ];
+        let plan = plan_removal(&project_with_a_session(), &dirs, false);
+        assert_eq!(plan.claude_dirs, vec!["-home-x-spm".to_string()]);
+        assert!(plan.worktrees.is_empty(), "a worktree needs --recursive");
+    }
+
+    #[test]
+    fn a_recursive_removal_takes_every_directory_under_the_root() {
+        let dirs = vec![
+            "-home-x-spm".to_string(),
+            "-home-x-spm--worktrees-api-mate-feat-a".to_string(),
+        ];
+        let plan = plan_removal(&project_with_a_session(), &dirs, true);
+        assert_eq!(plan.claude_dirs.len(), 2);
+        assert_eq!(
+            plan.worktrees,
+            vec![(
+                PathBuf::from("/home/x/spm/api-mate"),
+                PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_sibling_project_with_a_longer_name_is_never_taken() {
+        let dirs = vec!["-home-x-spm".to_string(), "-home-x-spm2".to_string()];
+        let plan = plan_removal(&project_with_a_session(), &dirs, true);
+        assert_eq!(
+            plan.claude_dirs,
+            vec!["-home-x-spm".to_string()],
+            "spm2 is a different project, not a directory under spm"
+        );
+    }
+
+    #[test]
+    fn a_worktree_of_an_unregistered_repository_is_left_alone() {
+        let mut project = project_with_a_session();
+        project.repos.clear();
+        let plan = plan_removal(&project, &[], true);
+        assert!(plan.worktrees.is_empty());
     }
 
     #[test]

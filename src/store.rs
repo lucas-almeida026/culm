@@ -20,6 +20,12 @@ pub trait Store: fmt::Debug {
     fn write_claude_settings(&self, settings: &Value) -> Result<()>;
     /// Removes the transcript of one session. Deletion has no undo.
     fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()>;
+    /// Forgets a project's own saved state. Deletes nothing the project holds.
+    fn remove_project(&self, slug: &str) -> Result<()>;
+    /// The directory names under `~/.claude/projects`.
+    fn list_claude_dirs(&self) -> Result<Vec<String>>;
+    /// Removes one whole directory under `~/.claude/projects`.
+    fn remove_claude_dir(&self, name: &str) -> Result<()>;
 }
 
 /// Reads and writes real files under the state directory.
@@ -132,6 +138,40 @@ impl Store for FsStore {
 
     fn write_claude_settings(&self, settings: &Value) -> Result<()> {
         write_atomic(&self.claude_settings, &serde_json::to_vec_pretty(settings)?)
+    }
+
+    fn remove_project(&self, slug: &str) -> Result<()> {
+        match std::fs::remove_file(self.project_path(slug)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("remove state of {slug}")),
+        }
+    }
+
+    fn list_claude_dirs(&self) -> Result<Vec<String>> {
+        let entries = match std::fs::read_dir(&self.claude_projects) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", self.claude_projects.display()));
+            }
+        };
+        Ok(entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect())
+    }
+
+    fn remove_claude_dir(&self, name: &str) -> Result<()> {
+        // A name is always one path segment from `list_claude_dirs`, so it cannot
+        // escape the projects directory.
+        let path = self.claude_projects.join(name);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+        }
     }
 
     fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()> {

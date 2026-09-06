@@ -204,6 +204,8 @@ impl PtySpawner for FakeSpawner {
 #[derive(Debug, Default, Clone)]
 pub struct FakeGit {
     calls: Arc<Mutex<Vec<WorktreeCall>>>,
+    removed: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    dirty: Arc<Mutex<Vec<std::path::PathBuf>>>,
     fail: Arc<AtomicBool>,
 }
 
@@ -225,6 +227,17 @@ impl FakeGit {
     pub fn fail_from_now_on(&self) {
         self.fail.store(true, Ordering::Relaxed);
     }
+
+    /// Every worktree culm asked git to remove.
+    #[must_use]
+    pub fn removed(&self) -> Vec<std::path::PathBuf> {
+        lock(&self.removed).clone()
+    }
+
+    /// Reports this worktree as holding an uncommitted change.
+    pub fn mark_dirty(&self, path: impl Into<std::path::PathBuf>) {
+        lock(&self.dirty).push(path.into());
+    }
 }
 
 impl crate::git::Git for FakeGit {
@@ -244,6 +257,15 @@ impl crate::git::Git for FakeGit {
         });
         Ok(())
     }
+
+    fn worktree_is_dirty(&self, path: &std::path::Path) -> Result<bool> {
+        Ok(lock(&self.dirty).iter().any(|p| p == path))
+    }
+
+    fn worktree_remove(&self, _repo: &std::path::Path, path: &std::path::Path) -> Result<()> {
+        lock(&self.removed).push(path.to_path_buf());
+        Ok(())
+    }
 }
 
 /// Keeps saved state in memory and counts the writes, so a test proves that state
@@ -255,6 +277,7 @@ pub struct MemoryStore {
     settings: Arc<Mutex<serde_json::Value>>,
     saves: Arc<std::sync::atomic::AtomicUsize>,
     removed_transcripts: Arc<Mutex<Vec<(std::path::PathBuf, String)>>>,
+    claude_dirs: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MemoryStore {
@@ -265,6 +288,7 @@ impl Default for MemoryStore {
             settings: Arc::new(Mutex::new(serde_json::json!({}))),
             saves: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             removed_transcripts: Arc::new(Mutex::new(Vec::new())),
+            claude_dirs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -292,6 +316,15 @@ impl MemoryStore {
 
     pub fn put_settings(&self, settings: serde_json::Value) {
         *lock(&self.settings) = settings;
+    }
+
+    /// Seeds the listing of `~/.claude/projects`.
+    pub fn put_claude_dirs<I, S>(&self, dirs: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *lock(&self.claude_dirs) = dirs.into_iter().map(Into::into).collect();
     }
 
     /// Every transcript culm asked to delete, as the working directory and the id.
@@ -332,6 +365,20 @@ impl crate::store::Store for MemoryStore {
 
     fn remove_transcript(&self, cwd: &std::path::Path, id: &str) -> Result<()> {
         lock(&self.removed_transcripts).push((cwd.to_path_buf(), id.to_string()));
+        Ok(())
+    }
+
+    fn remove_project(&self, slug: &str) -> Result<()> {
+        lock(&self.projects).remove(slug);
+        Ok(())
+    }
+
+    fn list_claude_dirs(&self) -> Result<Vec<String>> {
+        Ok(lock(&self.claude_dirs).clone())
+    }
+
+    fn remove_claude_dir(&self, name: &str) -> Result<()> {
+        lock(&self.claude_dirs).retain(|d| d != name);
         Ok(())
     }
 }

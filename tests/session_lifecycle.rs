@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::Parser;
 use culm::app::{App, Deps, Field, Focus, NewSession};
 use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
@@ -1010,4 +1011,102 @@ fn delete_does_nothing_while_the_shell_is_focused() {
 
     assert!(app.confirm_delete().is_none());
     assert_eq!(app.entries().len(), 1);
+}
+
+#[test]
+fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
+    let f = Fakes::new();
+    let mut registry = culm::project::Registry::default();
+    registry.add(ROOT);
+    f.store.save_registry(&registry).expect("registry saves");
+    f.store.put_project(&project());
+    f.store
+        .put_claude_dirs(["-home-x-spm", "-home-x-spm--worktrees-api-mate-feat-a"]);
+
+    culm::cli::run(
+        culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force"]),
+        &f.store,
+        &f.git,
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("rm succeeds");
+
+    assert!(f.store.load_registry().expect("load").projects.is_empty());
+    assert!(f.store.project("spm").is_none());
+    assert_eq!(
+        f.store.list_claude_dirs().expect("list"),
+        vec!["-home-x-spm--worktrees-api-mate-feat-a".to_string()],
+        "without --recursive only the root transcripts go"
+    );
+    assert!(
+        f.git.removed().is_empty(),
+        "no worktree without --recursive"
+    );
+}
+
+#[test]
+fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
+    let f = Fakes::new();
+    let mut registry = culm::project::Registry::default();
+    registry.add(ROOT);
+    f.store.save_registry(&registry).expect("registry saves");
+
+    let mut project = project();
+    project.sessions = vec![SessionRecord {
+        id: "id-1".into(),
+        name: "feat A".into(),
+        slug: "feat-a".into(),
+        state: SessionState::Paused,
+        cwd: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+        repos: vec![culm::project::SessionRepo {
+            name: "api-mate".into(),
+            worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+            branch: "feat-a".into(),
+        }],
+        started: true,
+    }];
+    f.store.put_project(&project);
+    f.store.put_claude_dirs([
+        "-home-x-spm",
+        "-home-x-spm--worktrees-api-mate-feat-a",
+        "-home-x-other",
+    ]);
+    f.git.mark_dirty("/home/x/spm/.worktrees/api-mate-feat-a");
+
+    culm::cli::run(
+        culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force", "--recursive"]),
+        &f.store,
+        &f.git,
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("rm succeeds");
+
+    assert_eq!(
+        f.store.list_claude_dirs().expect("list"),
+        vec!["-home-x-other".to_string()],
+        "a project outside the root is untouched"
+    );
+    assert_eq!(
+        f.git.removed(),
+        vec![PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")]
+    );
+    assert!(
+        f.git.calls().is_empty(),
+        "no branch is created or touched during a removal"
+    );
+}
+
+#[test]
+fn rm_refuses_an_unknown_project() {
+    let f = Fakes::new();
+    let result = culm::cli::run(
+        culm::cli::Cli::parse_from(["culm", "project", "rm", "absent", "--force"]),
+        &f.store,
+        &f.git,
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new("/tmp"),
+    );
+    assert!(result.is_err());
 }

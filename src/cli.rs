@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
+use crate::git::Git;
 use crate::hooks;
-use crate::project::{Project, ProjectEntry, Registry, Repository, slugify};
+use crate::project::{Project, ProjectEntry, Registry, Removal, Repository, plan_removal, slugify};
 use crate::store::Store;
 
 #[derive(Debug, Parser)]
@@ -48,6 +49,17 @@ pub enum ProjectCmd {
     },
     /// List every registered project.
     List,
+    /// Remove a project. Never deletes a branch, a source file, or a repository.
+    Rm {
+        project: String,
+        /// Skip the confirmation. Widens nothing.
+        #[arg(long)]
+        force: bool,
+        /// Also remove the Claude Code data of every path under the root, and every
+        /// worktree the project created.
+        #[arg(long)]
+        recursive: bool,
+    },
     /// Add or remove a repository of a project.
     #[command(subcommand)]
     Repo(RepoCmd),
@@ -87,7 +99,7 @@ pub enum Outcome {
 }
 
 /// Runs one command. Printing happens here, because a command line is output.
-pub fn run(cli: Cli, store: &dyn Store, exe: &Path, cwd: &Path) -> Result<Outcome> {
+pub fn run(cli: Cli, store: &dyn Store, git: &dyn Git, exe: &Path, cwd: &Path) -> Result<Outcome> {
     match cli.command {
         None => open(store, None, cwd),
         Some(Command::Open { project }) => open(store, project.as_deref(), cwd),
@@ -109,6 +121,11 @@ pub fn run(cli: Cli, store: &dyn Store, exe: &Path, cwd: &Path) -> Result<Outcom
         }
         Some(Command::Project(ProjectCmd::New { path })) => project_new(store, &path),
         Some(Command::Project(ProjectCmd::List)) => project_list(store),
+        Some(Command::Project(ProjectCmd::Rm {
+            project,
+            force,
+            recursive,
+        })) => project_rm(store, git, &project, force, recursive),
         Some(Command::Project(ProjectCmd::Repo(RepoCmd::Add { path, project }))) => {
             repo_add(store, &path, project.as_deref(), cwd)
         }
@@ -156,6 +173,64 @@ fn project_list(store: &dyn Store) -> Result<Outcome> {
             active
         );
     }
+    Ok(Outcome::Done)
+}
+
+/// Prints what a removal touches, and names every worktree that holds uncommitted
+/// work, so the confirmation is informed.
+fn describe(project: &Project, plan: &Removal, git: &dyn Git) -> Result<()> {
+    println!("removing project {}", project.slug);
+    println!("  registry entry and culm state");
+    for dir in &plan.claude_dirs {
+        println!("  claude data  ~/.claude/projects/{dir}");
+    }
+    for (_, worktree) in &plan.worktrees {
+        let dirty = git.worktree_is_dirty(worktree).unwrap_or(false);
+        let mark = if dirty { "  UNCOMMITTED WORK" } else { "" };
+        println!("  worktree     {}{mark}", worktree.display());
+    }
+    println!("no branch, no source file, and no repository is deleted.");
+    Ok(())
+}
+
+fn project_rm(
+    store: &dyn Store,
+    git: &dyn Git,
+    slug: &str,
+    force: bool,
+    recursive: bool,
+) -> Result<Outcome> {
+    let mut registry = store.load_registry()?;
+    let entry = registry
+        .find(slug)
+        .ok_or_else(|| anyhow!("no project named {slug}. run: culm project list"))?
+        .clone();
+    let project = load_or_new(store, &entry)?;
+    let plan = plan_removal(&project, &store.list_claude_dirs()?, recursive);
+
+    describe(&project, &plan, git)?;
+    if !force {
+        println!("type the project name to confirm:");
+        let mut typed = String::new();
+        std::io::stdin().read_line(&mut typed)?;
+        if typed.trim() != slug {
+            println!("cancelled. nothing was removed.");
+            return Ok(Outcome::Done);
+        }
+    }
+
+    for (repo, worktree) in &plan.worktrees {
+        if let Err(e) = git.worktree_remove(repo, worktree) {
+            println!("could not remove {}: {e}", worktree.display());
+        }
+    }
+    for dir in &plan.claude_dirs {
+        store.remove_claude_dir(dir)?;
+    }
+    store.remove_project(slug)?;
+    registry.projects.retain(|p| p.slug != slug);
+    store.save_registry(&registry)?;
+    println!("project {slug} removed");
     Ok(Outcome::Done)
 }
 

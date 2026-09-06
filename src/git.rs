@@ -11,6 +11,12 @@ pub trait Git: fmt::Debug {
     /// repository at `repo`. Does nothing when `path` already exists, so reopening a
     /// project never fails on a worktree that is already there.
     fn worktree_add(&self, repo: &Path, path: &Path, branch: &str) -> Result<()>;
+
+    /// True when the worktree holds a change that is not committed.
+    fn worktree_is_dirty(&self, path: &Path) -> Result<bool>;
+
+    /// Removes a worktree directory. Never removes its branch.
+    fn worktree_remove(&self, repo: &Path, path: &Path) -> Result<()>;
 }
 
 /// Runs the real `git` command.
@@ -32,6 +38,37 @@ impl Git for SystemGit {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             bail!("{}: {}", repo.display(), stderr.trim().replace('\n', " "));
+        }
+        Ok(())
+    }
+
+    fn worktree_is_dirty(&self, path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["status", "--porcelain"])
+            .output()?;
+        Ok(!out.stdout.is_empty())
+    }
+
+    fn worktree_remove(&self, repo: &Path, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        // The user already confirmed, and the prompt named every dirty worktree, so
+        // git is told not to refuse. The branch is never touched.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("{}: {}", path.display(), stderr.trim().replace('\n', " "));
         }
         Ok(())
     }

@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("culm"));
     let cwd = std::env::current_dir()?;
 
-    match cli::run(parsed, &store, &exe, &cwd)? {
+    match cli::run(parsed, &store, &SystemGit, &exe, &cwd)? {
         Outcome::Done => Ok(()),
         Outcome::Open(project) => open(*project, &store),
     }
