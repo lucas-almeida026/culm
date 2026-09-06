@@ -353,12 +353,12 @@ fn hook_events_mark_the_matching_session_only() {
     app.on_hook(&HookEvent {
         session_id: id,
         hook_event_name: "PermissionRequest".into(),
-        tool_name: None,
+        ..Default::default()
     });
     app.on_hook(&HookEvent {
         session_id: "a-session-culm-does-not-own".into(),
         hook_event_name: "Stop".into(),
-        tool_name: None,
+        ..Default::default()
     });
 
     assert_eq!(app.entries()[0].attention, Attention::NeedsPermission);
@@ -377,7 +377,7 @@ fn focusing_a_session_never_clears_its_marker() {
     app.on_hook(&HookEvent {
         session_id: id,
         hook_event_name: "Stop".into(),
-        tool_name: None,
+        ..Default::default()
     });
 
     app.set_focus(0);
@@ -397,7 +397,7 @@ fn answering_a_permission_prompt_clears_the_marker() {
     app.on_hook(&HookEvent {
         session_id: id,
         hook_event_name: "PermissionRequest".into(),
-        tool_name: None,
+        ..Default::default()
     });
     assert_eq!(app.entries()[0].attention, Attention::NeedsPermission);
 
@@ -430,7 +430,7 @@ fn a_key_sent_to_one_session_leaves_another_session_marked() {
         app.on_hook(&HookEvent {
             session_id: id,
             hook_event_name: "PermissionRequest".into(),
-            tool_name: None,
+            ..Default::default()
         });
     }
     app.set_focus(0);
@@ -452,7 +452,7 @@ fn a_paste_also_answers_a_permission_prompt() {
     app.on_hook(&HookEvent {
         session_id: id,
         hook_event_name: "PermissionRequest".into(),
-        tool_name: None,
+        ..Default::default()
     });
 
     app.on_paste("yes").expect("the paste is forwarded");
@@ -470,7 +470,7 @@ fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
     app.on_hook(&HookEvent {
         session_id: id.clone(),
         hook_event_name: "Stop".into(),
-        tool_name: None,
+        ..Default::default()
     });
 
     app.on_key(&key(KeyCode::Char('h'), KeyModifiers::NONE), &f.deps())
@@ -485,7 +485,7 @@ fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
     app.on_hook(&HookEvent {
         session_id: id,
         hook_event_name: "UserPromptSubmit".into(),
-        tool_name: None,
+        ..Default::default()
     });
     assert_eq!(app.entries()[0].attention, Attention::None);
 }

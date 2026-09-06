@@ -67,9 +67,18 @@ impl Attention {
         let asking = event.tool_name.as_deref() == Some("AskUserQuestion");
         match event.hook_event_name.as_str() {
             "PermissionRequest" => Attention::NeedsPermission,
-            // A permission prompt also raises a notification. The stronger marker wins.
-            "Notification" if self == Attention::NeedsPermission => self,
-            "Notification" => Attention::NeedsAnswer,
+            "Notification" => match event.notification_type.as_deref() {
+                Some("permission_prompt") => Attention::NeedsPermission,
+                // `max` keeps a permission marker above an answer marker.
+                Some("elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
+                    self.max(Attention::NeedsAnswer)
+                }
+                // `idle_prompt` fires after about a minute of silence, and says only
+                // that the session is idle, which `Stop` already reported. The rest
+                // (`auth_success`, `agent_completed`, `quota_*`, an unknown kind, or a
+                // payload with no kind at all) want nothing from the user.
+                _ => self,
+            },
             "PreToolUse" if asking => Attention::NeedsAnswer,
             // A tool or a subagent that reports in after the turn ended must not wipe
             // the done marker. Every hook of one event runs in parallel, and the
@@ -97,6 +106,9 @@ pub struct HookEvent {
     pub hook_event_name: String,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Which kind of notification this is. Only a few kinds want the user.
+    #[serde(default)]
+    pub notification_type: Option<String>,
 }
 
 /// True when `command` is a culm hook entry, whichever path the binary sits at.
@@ -216,6 +228,7 @@ pub fn listen(path: &Path) -> Result<Receiver<HookEvent>> {
     }
     let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
     let (tx, rx) = mpsc::channel();
+    let log = std::env::var_os("CULM_HOOK_LOG").map(PathBuf::from);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
@@ -223,14 +236,38 @@ pub fn listen(path: &Path) -> Result<Receiver<HookEvent>> {
             if stream.read_to_string(&mut payload).is_err() {
                 continue;
             }
-            if let Ok(event) = serde_json::from_str::<HookEvent>(&payload)
-                && tx.send(event).is_err()
-            {
-                break;
+            if let Ok(event) = serde_json::from_str::<HookEvent>(&payload) {
+                if let Some(log) = log.as_deref() {
+                    record(log, &event);
+                }
+                if tx.send(event).is_err() {
+                    break;
+                }
             }
         }
     });
     Ok(rx)
+}
+
+/// Appends one line per payload when `CULM_HOOK_LOG` names a file.
+///
+/// A diagnostic for reading which event follows `Stop`. Nothing in the interface
+/// depends on it, and a failure to write is ignored.
+fn record(path: &Path, event: &HookEvent) {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "{} {} {}",
+        event.hook_event_name,
+        event.tool_name.as_deref().unwrap_or("-"),
+        event.notification_type.as_deref().unwrap_or("-")
+    );
 }
 
 /// The `culm hook` subcommand. Reads the payload on stdin and posts it.
@@ -263,15 +300,21 @@ mod tests {
         HookEvent {
             session_id: "s1".into(),
             hook_event_name: name.into(),
-            tool_name: None,
+            ..Default::default()
+        }
+    }
+
+    fn notification(kind: &str) -> HookEvent {
+        HookEvent {
+            notification_type: Some(kind.into()),
+            ..event("Notification")
         }
     }
 
     fn tool_event(name: &str, tool: &str) -> HookEvent {
         HookEvent {
-            session_id: "s1".into(),
-            hook_event_name: name.into(),
             tool_name: Some(tool.into()),
+            ..event(name)
         }
     }
 
@@ -292,9 +335,69 @@ mod tests {
 
     #[test]
     fn a_notification_never_lowers_a_permission_marker() {
+        for kind in ["elicitation_dialog", "agent_needs_input", "idle_prompt"] {
+            assert_eq!(
+                Attention::NeedsPermission.apply(&notification(kind)),
+                Attention::NeedsPermission,
+                "{kind} must not replace a permission prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn an_idle_notification_moves_no_marker() {
         assert_eq!(
-            Attention::NeedsPermission.apply(&event("Notification")),
+            Attention::None.apply(&notification("idle_prompt")),
+            Attention::None,
+            "a minute of silence is not a question"
+        );
+        assert_eq!(
+            Attention::Done.apply(&notification("idle_prompt")),
+            Attention::Done
+        );
+    }
+
+    #[test]
+    fn a_permission_notification_raises_the_permission_marker() {
+        assert_eq!(
+            Attention::None.apply(&notification("permission_prompt")),
             Attention::NeedsPermission
+        );
+    }
+
+    #[test]
+    fn an_elicitation_notification_raises_the_answer_marker() {
+        for kind in [
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+        ] {
+            assert_eq!(
+                Attention::None.apply(&notification(kind)),
+                Attention::NeedsAnswer,
+                "{kind} wants the user"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_notification_moves_no_marker() {
+        for kind in [
+            "auth_success",
+            "agent_completed",
+            "quota_exceeded",
+            "something_new",
+        ] {
+            assert_eq!(
+                Attention::Done.apply(&notification(kind)),
+                Attention::Done,
+                "{kind} wants nothing from the user"
+            );
+        }
+        assert_eq!(
+            Attention::None.apply(&event("Notification")),
+            Attention::None,
+            "a payload with no kind moves nothing"
         );
     }
 
@@ -342,6 +445,8 @@ mod tests {
 
     /// Guards against an event added to `EVENTS` and forgotten in `apply`, where it
     /// would fall through to the catch-all and never move a marker.
+    ///
+    /// A notification only means something with a kind, so the guard supplies one.
     #[test]
     fn every_installed_event_moves_at_least_one_marker() {
         let states = [
@@ -351,8 +456,13 @@ mod tests {
             Attention::NeedsPermission,
         ];
         for name in EVENTS {
+            let payload = if name == "Notification" {
+                notification("permission_prompt")
+            } else {
+                event(name)
+            };
             assert!(
-                states.iter().any(|s| s.apply(&event(name)) != *s),
+                states.iter().any(|s| s.apply(&payload) != *s),
                 "{name} is installed but never changes a marker"
             );
         }
