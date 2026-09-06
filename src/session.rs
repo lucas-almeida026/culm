@@ -1,0 +1,129 @@
+//! One Claude Code session: a child process, its screen, and the thread that keeps
+//! the screen current.
+
+use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+
+use crate::pty::{Pty, PtySpawner, SessionSpec};
+
+const SCROLLBACK: usize = 2000;
+
+pub struct Session {
+    name: String,
+    parser: Arc<Mutex<vt100::Parser>>,
+    pty: Box<dyn Pty>,
+    bytes: Arc<AtomicU64>,
+    rows: u16,
+    cols: u16,
+}
+
+// vt100::Parser does not implement Debug, so Session implements it by hand.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("name", &self.name)
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .field("bytes_read", &self.bytes_read())
+            .finish()
+    }
+}
+
+impl Session {
+    /// Starts a session and the thread that drains it.
+    ///
+    /// The drain thread runs for every session, visible or not. An undrained
+    /// pseudoterminal fills its buffer and the child blocks. See FINDINGS.md.
+    pub fn spawn(spawner: &dyn PtySpawner, spec: &SessionSpec) -> Result<Self> {
+        let (pty, mut reader) = spawner.spawn(spec)?;
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            spec.rows, spec.cols, SCROLLBACK,
+        )));
+        let bytes = Arc::new(AtomicU64::new(0));
+
+        {
+            let parser = Arc::clone(&parser);
+            let bytes = Arc::clone(&bytes);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.fetch_add(n as u64, Ordering::Relaxed);
+                    if let Ok(mut p) = parser.lock() {
+                        p.process(&buf[..n]);
+                    }
+                }
+            });
+        }
+
+        Ok(Self {
+            name: spec.name.clone(),
+            parser,
+            pty,
+            bytes,
+            rows: spec.rows,
+            cols: spec.cols,
+        })
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn parser(&self) -> &Arc<Mutex<vt100::Parser>> {
+        &self.parser
+    }
+
+    pub fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.pty.write(data)
+    }
+
+    /// Resizes the child to match its panel. The child then wraps at the panel width.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        if (rows, cols) == (self.rows, self.cols) || rows == 0 || cols == 0 {
+            return Ok(());
+        }
+        self.rows = rows;
+        self.cols = cols;
+        self.pty.resize(rows, cols)?;
+        if let Ok(mut p) = self.parser.lock() {
+            p.screen_mut().set_size(rows, cols);
+        }
+        Ok(())
+    }
+
+    /// The visible screen as plain text. Tests read this instead of a terminal.
+    #[must_use]
+    pub fn screen_text(&self) -> String {
+        match self.parser.lock() {
+            Ok(p) => p.screen().contents(),
+            Err(e) => e.into_inner().screen().contents(),
+        }
+    }
+
+    /// Waits until the screen contains `needle`, or the timeout expires.
+    /// Tests use this instead of sleeping for a fixed period.
+    pub fn wait_for_text(&self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.screen_text().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+}
