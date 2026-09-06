@@ -25,7 +25,7 @@ culm treats the project as the unit. A project is any directory. Repositories jo
 - Creates a git worktree and a branch for a session that edits a repository, so that two sessions editing one repository do not collide.
 - Saves state on close and restores it on open, so that a reboot costs nothing.
 
-Full requirements live in `../spm/session-manager-spec.md`. Evidence for the architecture lives in [FINDINGS.md](FINDINGS.md), which records a spike that proved the stack on 2026-09-06.
+Full requirements live in `./session-manager-spec.md`. Evidence for the architecture lives in [FINDINGS.md](FINDINGS.md), which records a spike that proved the stack on 2026-09-06.
 
 ## Not in scope
 
