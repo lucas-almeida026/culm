@@ -40,6 +40,10 @@ pub struct SessionRecord {
     /// True once the session started at least once. A later start uses `--resume`.
     #[serde(default)]
     pub started: bool,
+    /// Unix seconds of the last interaction. Orders the paused list, newest first.
+    /// A record written before culm tracked this reads as zero and sorts last.
+    #[serde(default)]
+    pub last_active: u64,
 }
 
 impl SessionRecord {
@@ -343,6 +347,7 @@ mod tests {
                 branch: "feat-a".into(),
             }],
             started: true,
+            last_active: 0,
         }];
         project
     }

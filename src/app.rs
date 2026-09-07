@@ -7,6 +7,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use crate::clock::Clock;
 use crate::git::Git;
 use crate::hooks::{Attention, HookEvent};
 use crate::keys::{HostAction, host_action};
@@ -36,6 +37,7 @@ pub struct Deps<'a> {
     pub spawner: &'a dyn PtySpawner,
     pub git: &'a dyn Git,
     pub store: &'a dyn Store,
+    pub clock: &'a dyn Clock,
 }
 
 impl std::fmt::Debug for Deps<'_> {
@@ -132,6 +134,13 @@ pub struct App {
     fps: f64,
     rows: u16,
     cols: u16,
+    /// The clock reading of the most recent key or tick. A keystroke stamps the
+    /// session it reaches with this, so the paused list orders by last use without
+    /// reading the clock on every byte.
+    now: u64,
+    /// True when a record changed but the change has not reached the store. The tick
+    /// writes it, so typing never costs a file write.
+    dirty: bool,
 }
 
 impl App {
@@ -154,6 +163,8 @@ impl App {
             fps: 0.0,
             rows: 24,
             cols: 80,
+            now: 0,
+            dirty: false,
         }
     }
 
@@ -165,6 +176,7 @@ impl App {
         let mut app = Self::new(project);
         app.rows = rows;
         app.cols = cols;
+        app.now = deps.clock.now_secs();
         let records = std::mem::take(&mut app.project.sessions);
         for mut record in records {
             let mut entry = Entry {
@@ -365,6 +377,7 @@ impl App {
     /// Applies a host action, feeds the form, or forwards the bytes to the visible
     /// session.
     pub fn on_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) -> Result<()> {
+        self.now = deps.clock.now_secs();
         if self.modal.is_some() {
             return self.modal_key(key, deps);
         }
@@ -430,6 +443,10 @@ impl App {
         };
         if entry.attention == Attention::NeedsPermission {
             entry.attention = Attention::None;
+        }
+        if entry.record.last_active != self.now {
+            entry.record.last_active = self.now;
+            self.dirty = true;
         }
         if let Some(session) = entry.live.as_mut() {
             session.scroll_to_bottom();
@@ -653,6 +670,7 @@ impl App {
             cwd,
             repos,
             started: false,
+            last_active: deps.clock.now_secs(),
         };
 
         match self.start(&record, deps) {
@@ -685,6 +703,7 @@ impl App {
         if self.shell_focused {
             return Ok(());
         }
+        let now = deps.clock.now_secs();
         let Some(entry) = self.entries.get(self.entry_focus) else {
             return Ok(());
         };
@@ -700,6 +719,7 @@ impl App {
                 session.wait_for_exit(TERMINATE_GRACE);
             }
             entry.record.state = SessionState::Paused;
+            entry.record.last_active = now;
             entry.attention = Attention::None;
             entry.rss = 0;
             self.status = format!("{} paused", record.name);
@@ -716,6 +736,7 @@ impl App {
                     };
                     entry.record.started = true;
                     entry.record.state = SessionState::Active;
+                    entry.record.last_active = now;
                     entry.live = Some(session);
                     self.status = format!("{} resumed", record.name);
                 }
@@ -733,6 +754,7 @@ impl App {
 
     /// Once a second: reap a child that ended on its own, and sample memory.
     pub fn on_tick(&mut self, probe: &dyn MemoryProbe, deps: &Deps<'_>) -> Result<()> {
+        self.now = deps.clock.now_secs();
         let mut reaped = false;
         for entry in &mut self.entries {
             let Some(session) = entry.live.as_mut() else {
@@ -774,6 +796,8 @@ impl App {
             if let Some(id) = id {
                 self.focus_id(&id);
             }
+            self.save(deps)?;
+        } else if self.dirty {
             self.save(deps)?;
         }
         Ok(())
@@ -906,6 +930,7 @@ impl App {
     /// Writes the session list after every change, so an unexpected exit costs
     /// nothing.
     fn save(&mut self, deps: &Deps<'_>) -> Result<()> {
+        self.dirty = false;
         self.project.sessions = self.entries.iter().map(|e| e.record.clone()).collect();
         deps.store.save_project(&self.project)
     }

@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::Parser;
 use culm::app::{App, Deps, SIDEBAR_DEFAULT};
 use culm::cli::{Cli, Outcome};
+use culm::clock::SystemClock;
 use culm::git::SystemGit;
 use culm::project::Project;
 use culm::pty::SystemPtySpawner;
@@ -98,10 +99,12 @@ fn run(
     let spawner = SystemPtySpawner;
     let git = SystemGit;
     let probe = ProcMemoryProbe;
+    let clock = SystemClock;
     let deps = Deps {
         spawner: &spawner,
         git: &git,
         store,
+        clock: &clock,
     };
 
     // The first sessions start before the first draw, so the panel size is derived

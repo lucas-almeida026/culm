@@ -13,7 +13,7 @@ use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
 use culm::pty::SessionSpec;
 use culm::store::Store;
-use culm::testing::{FakeGit, FakeMemoryProbe, FakeSpawner, MemoryStore};
+use culm::testing::{FakeClock, FakeGit, FakeMemoryProbe, FakeSpawner, MemoryStore};
 use culm::ui::HitBox;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -52,6 +52,7 @@ fn record(name: &str, state: SessionState) -> SessionRecord {
         cwd: PathBuf::from(ROOT),
         repos: Vec::new(),
         started: true,
+        last_active: 0,
     }
 }
 
@@ -72,15 +73,12 @@ struct Fakes {
     spawner: FakeSpawner,
     git: FakeGit,
     store: MemoryStore,
+    clock: FakeClock,
 }
 
 impl Fakes {
     fn new() -> Self {
-        Self {
-            spawner: FakeSpawner::new(Vec::new()),
-            git: FakeGit::default(),
-            store: MemoryStore::new(),
-        }
+        Self::with_output(&[])
     }
 
     fn with_output(output: &[u8]) -> Self {
@@ -88,6 +86,7 @@ impl Fakes {
             spawner: FakeSpawner::new(output.to_vec()),
             git: FakeGit::default(),
             store: MemoryStore::new(),
+            clock: FakeClock::new(1_000),
         }
     }
 
@@ -96,6 +95,7 @@ impl Fakes {
             spawner: &self.spawner,
             git: &self.git,
             store: &self.store,
+            clock: &self.clock,
         }
     }
 }
@@ -1095,6 +1095,7 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
             branch: "feat-a".into(),
         }],
         started: true,
+        last_active: 0,
     }];
     f.store.put_project(&project);
     f.store.put_claude_dirs([
@@ -1343,4 +1344,54 @@ fn the_wheel_still_scrolls_culm_when_the_child_wants_no_mouse() {
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
     assert_eq!(pty.written_utf8(), "", "a shell gets no mouse bytes");
     assert_eq!(scrollback_of(&app), 3);
+}
+
+#[test]
+fn typing_stamps_the_session_with_the_time_of_the_keystroke() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+
+    f.clock.set(4_242);
+    app.on_key(&key(KeyCode::Char('h'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+
+    assert_eq!(app.entries()[0].record.last_active, 4_242);
+}
+
+#[test]
+fn a_stamp_from_a_keystroke_reaches_the_store_on_the_next_tick() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+    let saves = f.store.saves();
+
+    f.clock.set(4_242);
+    app.on_key(&key(KeyCode::Char('h'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    assert_eq!(f.store.saves(), saves, "typing never costs a file write");
+
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("the tick runs");
+
+    let saved = f.store.project("spm").expect("the project is saved");
+    assert_eq!(saved.sessions[0].last_active, 4_242);
+}
+
+#[test]
+fn pausing_and_resuming_both_stamp_the_session() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+
+    f.clock.set(100);
+    app.toggle_pause(&f.deps()).expect("pause");
+    assert_eq!(app.entries()[0].record.last_active, 100);
+
+    f.clock.set(200);
+    app.toggle_pause(&f.deps()).expect("resume");
+    assert_eq!(app.entries()[0].record.last_active, 200);
 }

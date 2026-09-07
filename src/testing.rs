@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
@@ -380,6 +380,31 @@ impl crate::store::Store for MemoryStore {
     fn remove_claude_dir(&self, name: &str) -> Result<()> {
         lock(&self.claude_dirs).retain(|d| d != name);
         Ok(())
+    }
+}
+
+/// A clock a test moves by hand, so an ordering rule never waits for real time.
+#[derive(Debug, Default, Clone)]
+pub struct FakeClock {
+    secs: Arc<AtomicU64>,
+}
+
+impl FakeClock {
+    #[must_use]
+    pub fn new(secs: u64) -> Self {
+        Self {
+            secs: Arc::new(AtomicU64::new(secs)),
+        }
+    }
+
+    pub fn set(&self, secs: u64) {
+        self.secs.store(secs, Ordering::Relaxed);
+    }
+}
+
+impl crate::clock::Clock for FakeClock {
+    fn now_secs(&self) -> u64 {
+        self.secs.load(Ordering::Relaxed)
     }
 }
 

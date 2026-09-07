@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod clock;
 pub mod git;
 pub mod hooks;
 pub mod keys;
