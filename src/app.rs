@@ -164,6 +164,10 @@ pub struct App {
     clipboard: String,
     /// Text the event loop has yet to hand to the terminal through OSC 52.
     copied: Option<String>,
+    /// What the paused list is filtered by. Empty means every paused session.
+    filter: String,
+    /// True while keys go to the search box rather than to a child.
+    filter_focused: bool,
 }
 
 impl App {
@@ -191,6 +195,8 @@ impl App {
             selection: None,
             clipboard: String::new(),
             copied: None,
+            filter: String::new(),
+            filter_focused: false,
         }
     }
 
@@ -372,6 +378,34 @@ impl App {
         self.copied.take()
     }
 
+    /// What the paused list is filtered by.
+    #[must_use]
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// True while the search box holds the keys.
+    #[must_use]
+    pub fn filter_focused(&self) -> bool {
+        self.filter_focused
+    }
+
+    /// The paused entries the filter admits, in list order.
+    ///
+    /// The interface and the search box both read this, so what `Enter` lands on is
+    /// always the first row on screen.
+    #[must_use]
+    pub fn paused_matches(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_active())
+            .filter(|(_, entry)| needle.is_empty() || entry.name().to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// The last copy, which a middle click pastes.
     #[must_use]
     pub fn clipboard(&self) -> &str {
@@ -454,10 +488,18 @@ impl App {
             Some(HostAction::FocusShell) => self.focus_shell(),
             Some(HostAction::DeleteSession) => self.open_delete(),
             Some(HostAction::RenameSession) => self.open_rename(),
+            Some(HostAction::FindSession) => {
+                self.filter_focused = !self.filter_focused;
+                self.selection = None;
+            }
             // Half a panel, the step a pager uses.
             Some(HostAction::ScrollUp) => self.scroll_focus(i32::from(self.rows / 2)),
             Some(HostAction::ScrollDown) => self.scroll_focus(-i32::from(self.rows / 2)),
             None => {
+                if self.filter_focused {
+                    self.filter_key(key);
+                    return Ok(());
+                }
                 if let Some(bytes) = crate::keys::encode(key) {
                     self.send_to_focus(&bytes)?;
                 }
@@ -484,6 +526,10 @@ impl App {
                 return Ok(());
             }
             None => {}
+        }
+        if self.filter_focused {
+            self.filter.push_str(text);
+            return Ok(());
         }
         let bytes = crate::keys::encode_paste(text);
         self.send_to_focus(&bytes)
@@ -614,6 +660,31 @@ impl App {
             name: entry.record.name.clone(),
             typed: String::new(),
         }));
+    }
+
+    /// Feeds the search box. No key reaches a child while the box holds the focus.
+    ///
+    /// `Enter` lands on the first match and hands the keys back to the panel, and the
+    /// filter stays, so the list still shows what was searched for.
+    fn filter_key(&mut self, key: &ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.filter_focused = false;
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Enter => {
+                if let Some(&index) = self.paused_matches().first() {
+                    self.set_focus(index);
+                }
+                self.filter_focused = false;
+            }
+            KeyCode::Char(c) => self.filter.push(c),
+            _ => {}
+        }
     }
 
     /// Opens the rename form, pre-filled with the current name. A paused session
@@ -984,6 +1055,10 @@ impl App {
                 self.dragging = true;
             }
             MouseEventKind::Down(MouseButton::Left) if column < hit.sidebar_width => {
+                if hit.search_row == Some(row) {
+                    self.filter_focused = true;
+                    return;
+                }
                 match hit.rows.iter().find(|(r, _)| *r == row) {
                     Some((_, Focus::Shell)) => self.focus_shell(),
                     Some((_, Focus::Entry(index))) => self.set_focus(*index),
@@ -1092,6 +1167,10 @@ impl App {
                 paused.push(entry);
             }
         }
+        // The active half keeps its order, because a digit addresses it. The paused
+        // half is ordered by last use, newest first, and the sort is stable, so two
+        // sessions of the same age keep the order they were added in.
+        paused.sort_by(|a, b| b.record.last_active.cmp(&a.record.last_active));
         active.append(&mut paused);
         self.entries = active;
         if let Some(id) = focused {

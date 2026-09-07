@@ -637,6 +637,7 @@ fn a_click_on_a_sidebar_row_switches_the_visible_session() {
         rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
+        search_row: None,
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 2, &hit);
@@ -654,6 +655,7 @@ fn dragging_the_separator_resizes_the_sidebar_within_its_limits() {
         rows: Vec::new(),
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
+        search_row: None,
     };
     let _ = &f;
 
@@ -691,6 +693,7 @@ fn a_click_inside_the_panel_never_changes_the_focus() {
         rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
+        search_row: None,
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 60, 2, &hit);
@@ -917,6 +920,7 @@ fn a_click_on_the_shell_row_focuses_the_shell() {
         rows: vec![(1, Focus::Shell), (4, Focus::Entry(0))],
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
+        search_row: None,
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 4, &hit);
@@ -1164,6 +1168,7 @@ fn panel_hit() -> HitBox {
         rows: Vec::new(),
         panel: Rect::new(30, 0, 50, 10),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 10)),
+        search_row: None,
     }
 }
 
@@ -1694,4 +1699,187 @@ fn a_selection_over_the_shell_copies_from_the_shell() {
     drag(&mut app, &hit, at(0, 0), at(0, 6));
 
     assert_eq!(app.clipboard(), "a shell");
+}
+
+/// Three sessions, paused in a known order, each one second apart.
+fn three_paused(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    for (name, at) in [("alpha", 100), ("beta", 200), ("gamma", 300)] {
+        f.clock.set(at);
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("session starts");
+        app.toggle_pause(&f.deps()).expect("pause");
+    }
+    app
+}
+
+#[test]
+fn paused_sessions_are_listed_most_recent_first() {
+    let f = Fakes::new();
+    let app = three_paused(&f);
+
+    let names: Vec<&str> = app.entries().iter().map(culm::app::Entry::name).collect();
+    assert_eq!(names, vec!["gamma", "beta", "alpha"]);
+}
+
+#[test]
+fn resuming_a_session_moves_it_to_the_front_of_the_paused_list_when_it_pauses_again() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+    let alpha = app
+        .entries()
+        .iter()
+        .position(|e| e.name() == "alpha")
+        .expect("alpha is listed");
+    app.set_focus(alpha);
+
+    f.clock.set(400);
+    app.toggle_pause(&f.deps()).expect("resume");
+    f.clock.set(500);
+    app.toggle_pause(&f.deps()).expect("pause again");
+
+    let names: Vec<&str> = app.entries().iter().map(culm::app::Entry::name).collect();
+    assert_eq!(names, vec!["alpha", "gamma", "beta"]);
+}
+
+#[test]
+fn the_active_half_keeps_its_order_because_a_digit_addresses_it() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    for (name, at) in [("alpha", 300), ("beta", 200), ("gamma", 100)] {
+        f.clock.set(at);
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("session starts");
+    }
+
+    let names: Vec<&str> = app.entries().iter().map(culm::app::Entry::name).collect();
+    assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+}
+
+fn find(app: &mut App, f: &Fakes) {
+    app.on_key(&key(KeyCode::Char('F'), KeyModifiers::ALT), &f.deps())
+        .expect("the search box opens");
+}
+
+fn type_into(app: &mut App, f: &Fakes, text: &str) {
+    for c in text.chars() {
+        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
+            .expect("the key is handled");
+    }
+}
+
+#[test]
+fn typing_in_the_search_box_filters_the_paused_list() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+
+    find(&mut app, &f);
+    type_into(&mut app, &f, "be");
+
+    let matched: Vec<&str> = app
+        .paused_matches()
+        .into_iter()
+        .map(|i| app.entries()[i].name())
+        .collect();
+    assert_eq!(matched, vec!["beta"]);
+}
+
+#[test]
+fn the_filter_ignores_case() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+
+    find(&mut app, &f);
+    type_into(&mut app, &f, "GAM");
+
+    assert_eq!(app.paused_matches().len(), 1);
+}
+
+#[test]
+fn a_backspace_widens_the_filter_again() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+
+    find(&mut app, &f);
+    type_into(&mut app, &f, "beta");
+    app.on_key(&key(KeyCode::Backspace, KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+
+    assert_eq!(app.filter(), "bet");
+    assert_eq!(app.paused_matches().len(), 1);
+}
+
+#[test]
+fn escape_clears_the_filter_and_returns_keys_to_the_panel() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+    find(&mut app, &f);
+    type_into(&mut app, &f, "beta");
+
+    app.on_key(&key(KeyCode::Esc, KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+
+    assert_eq!(app.filter(), "");
+    assert!(!app.filter_focused());
+    assert_eq!(app.paused_matches().len(), 3);
+}
+
+#[test]
+fn enter_focuses_the_first_match_and_keeps_the_filter() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+    find(&mut app, &f);
+    type_into(&mut app, &f, "alp");
+
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+
+    assert!(!app.filter_focused());
+    assert_eq!(
+        app.filter(),
+        "alp",
+        "the list still shows what was searched"
+    );
+    let focused = app.focused_entry().expect("a session holds the focus");
+    assert_eq!(app.entries()[focused].name(), "alpha");
+}
+
+#[test]
+fn keys_go_to_the_search_box_and_never_to_the_child() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+
+    find(&mut app, &f);
+    type_into(&mut app, &f, "abc");
+    app.on_paste("pasted").expect("the paste is handled");
+
+    assert_eq!(pty.written_utf8(), "", "no byte reached the session");
+    assert_eq!(app.filter(), "abcpasted");
+}
+
+#[test]
+fn an_alt_action_still_works_while_the_search_box_is_focused() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+    find(&mut app, &f);
+
+    app.on_key(&key(KeyCode::Char('0'), KeyModifiers::ALT), &f.deps())
+        .expect("the key is handled");
+
+    assert_eq!(app.focus(), Focus::Shell);
+}
+
+#[test]
+fn a_click_on_the_search_row_focuses_the_box() {
+    let f = Fakes::new();
+    let mut app = three_paused(&f);
+    let mut hit = panel_hit();
+    hit.search_row = Some(7);
+
+    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 7, &hit);
+
+    assert!(app.filter_focused());
 }

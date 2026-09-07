@@ -24,6 +24,8 @@ pub struct HitBox {
     pub panel: Rect,
     /// The panel without its border. A selection is measured from this corner.
     pub inner: Rect,
+    /// The row holding the search box. A click there focuses it.
+    pub search_row: Option<u16>,
 }
 
 impl Default for HitBox {
@@ -34,6 +36,7 @@ impl Default for HitBox {
             rows: Vec::new(),
             panel: Rect::new(0, 0, 0, 0),
             inner: Rect::new(0, 0, 0, 0),
+            search_row: None,
         }
     }
 }
@@ -55,7 +58,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
             .split(body);
     let (sidebar, panel) = (columns[0], columns[1]);
 
-    let rows = draw_sidebar(f, app, sidebar);
+    let (rows, search_row) = draw_sidebar(f, app, sidebar);
     draw_panel(f, app, panel);
     if let Some((start, end)) = app.selection() {
         highlight(f, inner_of(panel), start, end);
@@ -77,6 +80,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         rows,
         panel,
         inner: inner_of(panel),
+        search_row,
     }
 }
 
@@ -91,7 +95,8 @@ pub fn inner_of(panel: Rect) -> Rect {
     }
 }
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, Focus)> {
+/// Draws the sidebar and reports where each row landed, and where the search box is.
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Option<u16>) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut rows: Vec<(u16, Focus)> = Vec::new();
@@ -121,12 +126,14 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, Focus)> {
 
     lines.push(Line::from(""));
     lines.push(header("paused"));
-    let mut paused = 0usize;
-    for (index, entry) in app.entries().iter().enumerate() {
-        if entry.is_active() {
+    let search_row = area.y + 1 + lines.len() as u16;
+    lines.push(search_line(app, inner_width));
+
+    let matches = app.paused_matches();
+    for &index in &matches {
+        let Some(entry) = app.entries().get(index) else {
             continue;
-        }
-        paused += 1;
+        };
         rows.push((area.y + 1 + lines.len() as u16, Focus::Entry(index)));
         lines.push(entry_line(
             entry,
@@ -135,15 +142,34 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> Vec<(u16, Focus)> {
             inner_width,
         ));
     }
-    if paused == 0 {
-        lines.push(dim("  none"));
+    if matches.is_empty() {
+        lines.push(dim(if app.filter().is_empty() {
+            "  none"
+        } else {
+            "  no match"
+        }));
     }
 
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title("culm")),
         area,
     );
-    rows
+    (rows, Some(search_row))
+}
+
+/// The search box. It filters the paused list on every keystroke.
+fn search_line(app: &App, inner_width: usize) -> Line<'static> {
+    let style = if app.filter_focused() {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let text = format!(" / {}", app.filter());
+    let pad = inner_width.saturating_sub(text.chars().count());
+    Line::from(vec![
+        Span::styled(text, style),
+        Span::styled(" ".repeat(pad), style),
+    ])
 }
 
 /// Position 0. It carries no marker, so the prefix stays blank and the names below
@@ -295,7 +321,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+R rename   Alt+Shift+X delete   Ctrl+q quit",
+            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+R rename   Alt+Shift+F find   Alt+Shift+X delete   Ctrl+q quit",
             Style::default().fg(Color::DarkGray),
         ));
     }
