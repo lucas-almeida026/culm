@@ -122,7 +122,8 @@ impl Registry {
             .max_by_key(|p| p.root.as_os_str().len())
     }
 
-    /// Registers `root` under a slug that no other project holds.
+    /// Registers `root` under a slug taken from the last part of the path, numbered
+    /// when another project already holds it.
     pub fn add(&mut self, root: impl Into<PathBuf>) -> ProjectEntry {
         let root = root.into();
         let base = root
@@ -130,10 +131,35 @@ impl Registry {
             .map(|n| slugify(&n.to_string_lossy()))
             .unwrap_or_else(|| "project".to_string());
         let taken: Vec<&str> = self.projects.iter().map(|p| p.slug.as_str()).collect();
-        let entry = ProjectEntry {
-            slug: unique_slug(&base, &taken),
-            root,
-        };
+        let slug = unique_slug(&base, &taken);
+        self.push(root, slug)
+    }
+
+    /// Registers `root` under `slug` exactly. Returns `None` when another project
+    /// already holds the slug.
+    ///
+    /// A user who names a project names it to type it later, so a numbered slug would
+    /// be the wrong answer here. The caller reports the collision instead.
+    pub fn add_as(&mut self, root: impl Into<PathBuf>, slug: &str) -> Option<ProjectEntry> {
+        if self.find(slug).is_some() {
+            return None;
+        }
+        Some(self.push(root.into(), slug.to_string()))
+    }
+
+    /// Moves a project to another slug. Returns `None` when `from` names no project,
+    /// or when another project already holds `to`.
+    pub fn rename(&mut self, from: &str, to: &str) -> Option<ProjectEntry> {
+        if from != to && self.find(to).is_some() {
+            return None;
+        }
+        let entry = self.projects.iter_mut().find(|p| p.slug == from)?;
+        entry.slug = to.to_string();
+        Some(entry.clone())
+    }
+
+    fn push(&mut self, root: PathBuf, slug: String) -> ProjectEntry {
+        let entry = ProjectEntry { slug, root };
         self.projects.push(entry.clone());
         entry
     }
@@ -266,6 +292,9 @@ pub fn system_prompt(repos: &[SessionRepo]) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Test code may use `expect` with a message. Library code may not.
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -323,6 +352,51 @@ mod tests {
         let mut r = Registry::default();
         assert_eq!(r.add("/a/spm").slug, "spm");
         assert_eq!(r.add("/b/spm").slug, "spm-2");
+    }
+
+    #[test]
+    fn a_named_project_takes_the_name_exactly() {
+        let mut r = Registry::default();
+        let entry = r.add_as("/a/spm", "billing").expect("the slug is free");
+        assert_eq!(entry.slug, "billing");
+        assert_eq!(
+            r.find("billing").map(|p| p.root.as_path()),
+            Some(Path::new("/a/spm"))
+        );
+    }
+
+    #[test]
+    fn a_name_another_project_holds_is_refused_rather_than_numbered() {
+        let mut r = Registry::default();
+        r.add("/a/spm");
+        assert!(r.add_as("/b/other", "spm").is_none());
+        assert_eq!(r.projects.len(), 1, "nothing is registered on a collision");
+    }
+
+    #[test]
+    fn a_rename_moves_the_entry_and_keeps_the_root() {
+        let mut r = Registry::default();
+        r.add("/a/spm");
+        let renamed = r.rename("spm", "billing").expect("the rename applies");
+        assert_eq!(renamed.slug, "billing");
+        assert_eq!(renamed.root, PathBuf::from("/a/spm"));
+        assert!(r.find("spm").is_none());
+    }
+
+    #[test]
+    fn a_rename_onto_a_taken_name_changes_nothing() {
+        let mut r = Registry::default();
+        r.add("/a/spm");
+        r.add("/b/billing");
+        assert!(r.rename("spm", "billing").is_none());
+        assert!(r.find("spm").is_some(), "the original name still resolves");
+    }
+
+    #[test]
+    fn a_rename_of_an_unknown_project_reports_nothing_renamed() {
+        let mut r = Registry::default();
+        r.add("/a/spm");
+        assert!(r.rename("absent", "billing").is_none());
     }
 
     #[test]

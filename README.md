@@ -6,7 +6,7 @@ A grove of bamboo sends many culms up from one shared rhizome. Each stem stands 
 
 ## Status
 
-Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 184 cases through the fakes.
+Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 200 cases through the fakes.
 
 Not built yet: archive, session reordering, and the TOML configuration file.
 
@@ -16,7 +16,10 @@ See [session-manager-spec.md](session-manager-spec.md) for the requirements, [FI
 
 ```
 culm hooks install                 # once, so attention markers work
-culm project new <path>            # register a directory
+culm project new <path>            # register a directory, named after its last part
+culm project new <path> --name <name>
+                                   # register it under a name you choose
+culm project alter name <name>     # rename it, so culm open <name> works
 culm project new <path> --import-native-sessions
                                    # register it and pull in the sessions it holds
 culm project repo add <path>       # add a git repository to it
@@ -25,6 +28,8 @@ culm                               # open the project that owns this directory
 culm open --import-native-sessions # import, then open
 culm project rm <project>          # unregister it, never deletes source or branches
 ```
+
+A project name becomes a slug, so `--name "Billing Rewrite"` gives you `culm open billing-rewrite`. A name another project already holds is refused rather than numbered. A rename moves the saved state and keeps the root, the repositories, and every session.
 
 An import keeps the session id of each transcript, so resuming one reaches the same conversation. It takes the name from the title the session carries inside Claude Code. A session that was never named there is named by a headless `claude -p --model haiku` child reading the first prompt. Every imported session arrives paused.
 

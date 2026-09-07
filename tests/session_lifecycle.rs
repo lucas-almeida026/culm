@@ -1883,3 +1883,236 @@ fn a_click_on_the_search_row_focuses_the_box() {
 
     assert!(app.filter_focused());
 }
+
+/// A registered project, ready for a rename.
+fn registered(f: &Fakes, slug: &str, root: &str) {
+    let mut registry = f.store.load_registry().expect("load");
+    registry.add_as(root, slug).expect("the slug is free");
+    f.store.save_registry(&registry).expect("registry saves");
+    f.store.put_project(&Project::new(slug, root));
+}
+
+fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
+    culm::cli::run(
+        culm::cli::Cli::parse_from(args),
+        &f.store,
+        &f.git,
+        &culm::testing::FakeNamer::default(),
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new(ROOT),
+    )
+}
+
+/// A real directory, because `culm project new` canonicalizes the path it is given.
+fn temp_root(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("culm-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::canonicalize(&dir).expect("canonical")
+}
+
+#[test]
+fn project_new_takes_the_name_from_the_flag() {
+    let f = Fakes::new();
+    let root = temp_root("named");
+
+    cli(
+        &f,
+        &[
+            "culm",
+            "project",
+            "new",
+            &root.display().to_string(),
+            "--name",
+            "Billing Rewrite",
+        ],
+    )
+    .expect("project new succeeds");
+
+    let registry = f.store.load_registry().expect("load");
+    assert_eq!(registry.projects[0].slug, "billing-rewrite");
+    assert_eq!(registry.projects[0].root, root);
+    assert!(
+        f.store.project("billing-rewrite").is_some(),
+        "the state file is named after the project"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn project_new_without_the_flag_still_takes_the_directory_name() {
+    let f = Fakes::new();
+    let root = temp_root("unnamed");
+
+    cli(&f, &["culm", "project", "new", &root.display().to_string()])
+        .expect("project new succeeds");
+
+    let registry = f.store.load_registry().expect("load");
+    assert_eq!(
+        registry.projects[0].slug,
+        culm::project::slugify(&root.file_name().expect("name").to_string_lossy())
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn project_new_refuses_a_name_another_project_holds() {
+    let f = Fakes::new();
+    registered(&f, "billing", "/home/x/other");
+    let root = temp_root("collides");
+
+    let result = cli(
+        &f,
+        &[
+            "culm",
+            "project",
+            "new",
+            &root.display().to_string(),
+            "--name",
+            "billing",
+        ],
+    );
+
+    assert!(result.is_err(), "a taken name is refused, never numbered");
+    assert_eq!(
+        f.store.load_registry().expect("load").projects.len(),
+        1,
+        "nothing is registered"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn altering_the_name_moves_the_registry_entry_and_the_state_file() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+
+    cli(&f, &["culm", "project", "alter", "name", "Billing Rewrite"]).expect("the rename succeeds");
+
+    let registry = f.store.load_registry().expect("load");
+    assert_eq!(registry.projects[0].slug, "billing-rewrite");
+    assert_eq!(registry.projects[0].root, PathBuf::from(ROOT));
+    let moved = f.store.project("billing-rewrite").expect("the state moved");
+    assert_eq!(moved.slug, "billing-rewrite");
+    assert_eq!(moved.root, PathBuf::from(ROOT));
+    assert!(
+        f.store.project("spm").is_none(),
+        "the old state file is gone"
+    );
+}
+
+#[test]
+fn open_finds_the_project_under_its_new_name() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+    cli(&f, &["culm", "project", "alter", "name", "billing"]).expect("the rename succeeds");
+
+    let outcome = cli(&f, &["culm", "open", "billing"]).expect("open succeeds");
+
+    match outcome {
+        culm::cli::Outcome::Open(project) => assert_eq!(project.slug, "billing"),
+        culm::cli::Outcome::Done => panic!("open must hand back a project"),
+    }
+    assert!(
+        cli(&f, &["culm", "open", "spm"]).is_err(),
+        "the old name no longer resolves"
+    );
+}
+
+#[test]
+fn altering_the_name_keeps_the_sessions_and_the_repositories() {
+    let f = Fakes::new();
+    let mut original = project();
+    original.sessions = vec![record("one", SessionState::Paused)];
+    let mut registry = culm::project::Registry::default();
+    registry.add(ROOT);
+    f.store.save_registry(&registry).expect("registry saves");
+    f.store.put_project(&original);
+
+    cli(&f, &["culm", "project", "alter", "name", "billing"]).expect("the rename succeeds");
+
+    let moved = f.store.project("billing").expect("the state moved");
+    assert_eq!(moved.sessions, original.sessions);
+    assert_eq!(moved.repos, original.repos);
+}
+
+#[test]
+fn altering_to_a_taken_name_changes_nothing() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+    registered(&f, "billing", "/home/x/billing");
+
+    let result = cli(&f, &["culm", "project", "alter", "name", "billing"]);
+
+    assert!(result.is_err());
+    let registry = f.store.load_registry().expect("load");
+    assert!(
+        registry.find("spm").is_some(),
+        "the old name still resolves"
+    );
+    assert_eq!(
+        registry.find("billing").map(|p| p.root.as_path()),
+        Some(std::path::Path::new("/home/x/billing")),
+        "the other project keeps its root"
+    );
+    assert!(f.store.project("spm").is_some());
+}
+
+#[test]
+fn an_empty_project_name_is_refused() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+
+    assert!(cli(&f, &["culm", "project", "alter", "name", "   "]).is_err());
+    assert!(f.store.project("spm").is_some());
+}
+
+#[test]
+fn altering_names_the_project_that_owns_the_working_directory() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+    registered(&f, "other", "/home/x/other");
+
+    cli(&f, &["culm", "project", "alter", "name", "billing"]).expect("the rename succeeds");
+
+    let registry = f.store.load_registry().expect("load");
+    assert!(registry.find("billing").is_some());
+    assert!(
+        registry.find("other").is_some(),
+        "a project the working directory does not belong to is untouched"
+    );
+}
+
+#[test]
+fn altering_a_named_project_reaches_it_from_anywhere() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+    registered(&f, "other", "/home/x/other");
+
+    cli(
+        &f,
+        &[
+            "culm",
+            "project",
+            "alter",
+            "name",
+            "billing",
+            "--project",
+            "other",
+        ],
+    )
+    .expect("the rename succeeds");
+
+    let registry = f.store.load_registry().expect("load");
+    assert!(registry.find("billing").is_some());
+    assert!(registry.find("spm").is_some());
+}
+
+#[test]
+fn altering_a_name_to_the_one_it_already_has_is_not_a_failure() {
+    let f = Fakes::new();
+    registered(&f, "spm", ROOT);
+
+    cli(&f, &["culm", "project", "alter", "name", "spm"]).expect("the command succeeds");
+
+    assert!(f.store.project("spm").is_some(), "the state is still there");
+}

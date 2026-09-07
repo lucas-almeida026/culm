@@ -54,6 +54,10 @@ pub enum ProjectCmd {
     New {
         /// Any directory. A git repository at the root is not required.
         path: PathBuf,
+        /// Name the project. Without this, the name comes from the last part of the
+        /// path.
+        #[arg(long)]
+        name: Option<String>,
         /// Import every Claude Code session found under the root.
         #[arg(long)]
         import_native_sessions: bool,
@@ -76,9 +80,24 @@ pub enum ProjectCmd {
         #[arg(long)]
         recursive: bool,
     },
+    /// Change a property of a project.
+    #[command(subcommand)]
+    Alter(AlterCmd),
     /// Add or remove a repository of a project.
     #[command(subcommand)]
     Repo(RepoCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AlterCmd {
+    /// Rename a project. `culm open <name>` takes the new name from then on.
+    Name {
+        name: String,
+        /// Project to rename. Defaults to the project that owns the working
+        /// directory.
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -153,8 +172,12 @@ pub fn run(
         }
         Some(Command::Project(ProjectCmd::New {
             path,
+            name,
             import_native_sessions,
-        })) => project_new(store, namer, &path, import_native_sessions),
+        })) => project_new(store, namer, &path, name.as_deref(), import_native_sessions),
+        Some(Command::Project(ProjectCmd::Alter(AlterCmd::Name { name, project }))) => {
+            project_rename(store, &name, project.as_deref(), cwd)
+        }
         Some(Command::Project(ProjectCmd::List)) => project_list(store),
         Some(Command::Project(ProjectCmd::Import { project })) => {
             project_import_cmd(store, namer, project.as_deref(), cwd)
@@ -173,7 +196,24 @@ pub fn run(
     }
 }
 
-fn project_new(store: &dyn Store, namer: &dyn Namer, path: &Path, import: bool) -> Result<Outcome> {
+/// The slug a project name becomes.
+///
+/// The slug is the identifier `culm open` takes and the name of the state file, so it
+/// carries no space and no separator.
+fn project_slug(name: &str) -> Result<String> {
+    if name.trim().is_empty() {
+        bail!("a project needs a name");
+    }
+    Ok(slugify(name))
+}
+
+fn project_new(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    path: &Path,
+    name: Option<&str>,
+    import: bool,
+) -> Result<Outcome> {
     let root = std::fs::canonicalize(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
@@ -186,7 +226,15 @@ fn project_new(store: &dyn Store, namer: &dyn Namer, path: &Path, import: bool) 
             existing.slug
         );
     }
-    let entry = registry.add(&root);
+    let entry = match name {
+        Some(name) => {
+            let slug = project_slug(name)?;
+            registry.add_as(&root, &slug).ok_or_else(|| {
+                anyhow!("a project named {slug} already exists. run: culm project list")
+            })?
+        }
+        None => registry.add(&root),
+    };
     store.save_registry(&registry)?;
     let mut project = Project::new(&entry.slug, &root);
     store.save_project(&project)?;
@@ -194,6 +242,38 @@ fn project_new(store: &dyn Store, namer: &dyn Namer, path: &Path, import: bool) 
     if import {
         report(&import_sessions(store, namer, &mut project)?);
     }
+    Ok(Outcome::Done)
+}
+
+/// Renames a project, and moves its saved state to the new name.
+///
+/// The state file is written under the new name before the registry points at it, so
+/// an interrupted rename leaves the old name working rather than leaving a registered
+/// project with no state.
+fn project_rename(
+    store: &dyn Store,
+    new_name: &str,
+    slug: Option<&str>,
+    cwd: &Path,
+) -> Result<Outcome> {
+    let mut registry = store.load_registry()?;
+    let entry = find_entry(&registry, slug, cwd)?.clone();
+    let new_slug = project_slug(new_name)?;
+    if new_slug == entry.slug {
+        println!("project {} already has that name", entry.slug);
+        return Ok(Outcome::Done);
+    }
+    if registry.rename(&entry.slug, &new_slug).is_none() {
+        bail!("a project named {new_slug} already exists. run: culm project list");
+    }
+
+    let mut project = load_or_new(store, &entry)?;
+    project.slug = new_slug.clone();
+    store.save_project(&project)?;
+    store.save_registry(&registry)?;
+    store.remove_project(&entry.slug)?;
+    println!("project {} is now {new_slug}", entry.slug);
+    println!("an interface already open on it keeps the old name until it closes.");
     Ok(Outcome::Done)
 }
 
@@ -453,19 +533,28 @@ fn open(
 /// Finds the project by slug, or the project that owns the working directory.
 fn resolve(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Project> {
     let registry = store.load_registry()?;
-    let entry = match slug {
+    let entry = find_entry(&registry, slug, cwd)?;
+    load_or_new(store, entry)
+}
+
+/// The named project, or the project that owns the working directory.
+fn find_entry<'a>(
+    registry: &'a Registry,
+    slug: Option<&str>,
+    cwd: &Path,
+) -> Result<&'a ProjectEntry> {
+    match slug {
         Some(slug) => registry
             .find(slug)
-            .ok_or_else(|| anyhow!("no project named {slug}. run: culm project list"))?,
+            .ok_or_else(|| anyhow!("no project named {slug}. run: culm project list")),
         None => registry.owner_of(cwd).ok_or_else(|| {
             anyhow!(
                 "{} belongs to no project. run: culm project new {}",
                 cwd.display(),
                 cwd.display()
             )
-        })?,
-    };
-    load_or_new(store, entry)
+        }),
+    }
 }
 
 fn load_or_new(store: &dyn Store, entry: &ProjectEntry) -> Result<Project> {
