@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
 use tui_term::widget::PseudoTerminal;
 
 use crate::app::{Answer, App, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
@@ -75,6 +75,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         Some(Modal::NewSession(form)) => draw_form(f, app, form, panel),
         Some(Modal::ConfirmDelete(confirm)) => buttons = draw_confirm(f, confirm, panel),
         Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
+        Some(Modal::Help) => draw_help(f, panel),
         None => {}
     }
 
@@ -317,26 +318,93 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// The pointer to the shortcut table. It never changes, so the user always knows
+/// where the bindings are without the bar carrying all of them.
+const HELP_HINT: &str = " press Alt+Shift+H for shortcuts ";
+
+/// The bottom bar. The left half points at the help, and the right half carries
+/// whatever last happened.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = Vec::new();
-    if !app.status().is_empty() {
-        spans.push(Span::styled(
-            format!(" {}", app.status()),
-            Style::default().fg(Color::Yellow),
-        ));
-    } else {
-        spans.push(Span::styled(
-            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+R rename   Alt+Shift+F find   Alt+Shift+X delete   Ctrl+q quit",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
+    let hint_width = u16::try_from(HELP_HINT.chars().count()).unwrap_or(0);
+    let columns =
+        Layout::horizontal([Constraint::Length(hint_width), Constraint::Min(0)]).split(area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            HELP_HINT,
+            Style::default().fg(Color::Black).bg(Color::DarkGray),
+        ))),
+        columns[0],
+    );
+
+    let mut spans = vec![Span::styled(
+        format!(" {}", app.status()),
+        Style::default().fg(Color::Yellow),
+    )];
     if !app.hooks_installed() {
         spans.push(Span::styled(
             "   markers off, run: culm hooks install",
             Style::default().fg(Color::Red),
         ));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), columns[1]);
+}
+
+/// Every binding culm reserves, and what each one does.
+const SHORTCUTS: [(&str, &str); 14] = [
+    ("Alt+0", "focus the shell at position 0"),
+    ("Alt+1 to Alt+9", "focus an active session"),
+    ("Alt+Shift+N", "create a session"),
+    ("Alt+Shift+P", "pause or resume the focused session"),
+    ("Alt+Shift+R", "rename the focused session"),
+    ("Alt+Shift+F", "search the paused list"),
+    ("Alt+Shift+X", "delete the focused paused session"),
+    ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
+    ("Alt+Shift+H", "this table"),
+    ("Ctrl+q", "quit"),
+    ("Shift+PageUp/Down", "scroll half a panel"),
+    ("wheel", "scroll, or reach a mouse-aware child"),
+    ("drag", "select, and copy on release"),
+    ("middle click", "paste the last copy"),
+];
+
+/// The shortcut table. Everything else the bar used to list lives here.
+fn draw_help(f: &mut Frame, panel: Rect) {
+    let width = 64.min(panel.width.saturating_sub(2));
+    let height = u16::try_from(SHORTCUTS.len() + 3)
+        .unwrap_or(u16::MAX)
+        .min(panel.height);
+    let area = Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let rows = SHORTCUTS.iter().map(|(keys, does)| {
+        Row::new([
+            Cell::from(Span::styled(
+                format!(" {keys}"),
+                Style::default().fg(Color::Cyan),
+            )),
+            Cell::from(Span::styled(*does, Style::default().fg(Color::Gray))),
+        ])
+    });
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Table::new(rows, [Constraint::Length(20), Constraint::Min(10)])
+            .block(Block::bordered().title(" shortcuts "))
+            .column_spacing(1),
+        area,
+    );
+    // The hint sits on the last row inside the border, below the table.
+    let hint = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    if area.height > 2 {
+        f.render_widget(Paragraph::new(dim(" Esc closes")), hint);
+    }
 }
 
 fn draw_fps(f: &mut Frame, app: &App, panel: Rect) {
@@ -623,6 +691,29 @@ mod tests {
         assert_eq!(buttons[0].1, Answer::Yes);
         assert_eq!(read(buttons[1].0), "[ no ]");
         assert_eq!(buttons[1].1, Answer::No);
+    }
+
+    /// The table is drawn at a fixed width, so a description that outgrows its
+    /// column would be silently cut on screen.
+    #[test]
+    fn every_shortcut_description_fits_its_column() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("the test backend starts");
+        terminal
+            .draw(|f| draw_help(f, Rect::new(0, 0, 80, 24)))
+            .expect("the table draws");
+
+        let buffer = terminal.backend().buffer();
+        // `Cell` here is the table cell, so the buffer cell is reached by closure.
+        let text: String = buffer
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        for (keys, does) in SHORTCUTS {
+            assert!(text.contains(keys), "{keys} is missing from the table");
+            assert!(text.contains(does), "the description of {keys} is cut off");
+        }
     }
 
     #[test]

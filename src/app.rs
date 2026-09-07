@@ -138,6 +138,8 @@ pub enum Modal {
     NewSession(NewSession),
     ConfirmDelete(ConfirmDelete),
     Rename(Rename),
+    /// The shortcut table. It reads state and changes none, so it holds no data.
+    Help,
 }
 
 #[derive(Debug)]
@@ -421,6 +423,12 @@ impl App {
         &self.clipboard
     }
 
+    /// True while the shortcut table is on screen.
+    #[must_use]
+    pub fn help_open(&self) -> bool {
+        matches!(self.modal, Some(Modal::Help))
+    }
+
     /// The rename form, when that is the form on screen.
     #[must_use]
     pub fn rename_form(&self) -> Option<&Rename> {
@@ -497,6 +505,7 @@ impl App {
             Some(HostAction::FocusShell) => self.focus_shell(),
             Some(HostAction::DeleteSession) => self.open_delete(),
             Some(HostAction::RenameSession) => self.open_rename(),
+            Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
             Some(HostAction::FindSession) => {
                 self.filter_focused = !self.filter_focused;
                 self.selection = None;
@@ -526,8 +535,8 @@ impl App {
                 }
                 return Ok(());
             }
-            // A paste is not an answer, so the confirmation ignores it.
-            Some(Modal::ConfirmDelete(_)) => return Ok(()),
+            // Neither the confirmation nor the help takes text.
+            Some(Modal::ConfirmDelete(_) | Modal::Help) => return Ok(()),
             Some(Modal::Rename(rename)) => {
                 rename.name.push_str(text);
                 return Ok(());
@@ -775,6 +784,16 @@ impl App {
                         }
                     }
                     _ => {}
+                }
+                return Ok(());
+            }
+            Some(Modal::Help) => {
+                // The help changes nothing, so any key that dismisses a dialog
+                // dismisses it, and no other key reaches a child.
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter)
+                    || host_action(key) == Some(HostAction::ShowHelp)
+                {
+                    self.modal = None;
                 }
                 return Ok(());
             }

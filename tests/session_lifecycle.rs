@@ -2343,3 +2343,57 @@ fn repo_list_refuses_a_directory_that_belongs_to_no_project() {
         "there is no project to list repositories of"
     );
 }
+
+#[test]
+fn alt_shift_h_opens_and_closes_the_shortcut_table() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+
+    app.on_key(&key(KeyCode::Char('H'), KeyModifiers::ALT), &f.deps())
+        .expect("the table opens");
+    assert!(app.help_open());
+
+    app.on_key(&key(KeyCode::Char('H'), KeyModifiers::ALT), &f.deps())
+        .expect("the same key closes it");
+    assert!(!app.help_open());
+}
+
+#[test]
+fn escape_closes_the_shortcut_table() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    app.on_key(&key(KeyCode::Char('H'), KeyModifiers::ALT), &f.deps())
+        .expect("the table opens");
+
+    app.on_key(&key(KeyCode::Esc, KeyModifiers::NONE), &f.deps())
+        .expect("escape closes it");
+
+    assert!(!app.help_open());
+}
+
+#[test]
+fn no_key_reaches_the_child_while_the_shortcut_table_is_open() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+    app.on_key(&key(KeyCode::Char('H'), KeyModifiers::ALT), &f.deps())
+        .expect("the table opens");
+
+    app.on_key(&key(KeyCode::Char('z'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    app.on_paste("pasted").expect("the paste is handled");
+
+    assert_eq!(pty.written_utf8(), "");
+    assert!(app.help_open(), "an ordinary key leaves the table open");
+}
+
+#[test]
+fn the_shortcut_table_opens_over_the_shell_as_well() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+
+    app.on_key(&key(KeyCode::Char('H'), KeyModifiers::ALT), &f.deps())
+        .expect("the table opens");
+
+    assert!(app.help_open());
+}
