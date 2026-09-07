@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
+use crate::app::{Answer, App, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -26,6 +26,8 @@ pub struct HitBox {
     pub inner: Rect,
     /// The row holding the search box. A click there focuses it.
     pub search_row: Option<u16>,
+    /// Where each button of the open confirmation sits. A click answers it.
+    pub buttons: Vec<(Rect, Answer)>,
 }
 
 impl Default for HitBox {
@@ -37,6 +39,7 @@ impl Default for HitBox {
             panel: Rect::new(0, 0, 0, 0),
             inner: Rect::new(0, 0, 0, 0),
             search_row: None,
+            buttons: Vec::new(),
         }
     }
 }
@@ -67,9 +70,10 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
     if app.nerd_mode() {
         draw_fps(f, app, panel);
     }
+    let mut buttons = Vec::new();
     match app.modal() {
         Some(Modal::NewSession(form)) => draw_form(f, app, form, panel),
-        Some(Modal::ConfirmDelete(confirm)) => draw_confirm(f, confirm, panel),
+        Some(Modal::ConfirmDelete(confirm)) => buttons = draw_confirm(f, confirm, panel),
         Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
         None => {}
     }
@@ -81,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         panel,
         inner: inner_of(panel),
         search_row,
+        buttons,
     }
 }
 
@@ -433,17 +438,20 @@ fn draw_terminal(f: &mut Frame, session: &crate::session::Session, title: String
     );
 }
 
-/// Deletion has no undo, so the name must be retyped before `Enter` does anything.
-fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) {
+/// The delete confirmation, as two buttons.
+///
+/// The cursor starts on `no`, because deletion has no undo. Returns where each button
+/// landed, so a click answers the same question the keys do.
+fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) -> Vec<(Rect, Answer)> {
     let width = 60.min(panel.width.saturating_sub(2));
-    let height = 9.min(panel.height);
+    // Eight lines of content, plus the two border rows.
+    let height = 10.min(panel.height);
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
         y: panel.y + (panel.height.saturating_sub(height)) / 2,
         width,
         height,
     };
-    let ready = confirm.confirmed();
     let lines = vec![
         Line::from(Span::styled(
             format!(" delete {} and its transcript?", confirm.name),
@@ -454,28 +462,54 @@ fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) {
         dim(" this cannot be undone."),
         Line::from(""),
         Line::from(vec![
-            Span::raw(" type the name  "),
-            Span::styled(
-                format!("{} ", confirm.typed),
-                if ready {
-                    Style::default().fg(Color::Black).bg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                },
-            ),
+            Span::raw(" "),
+            button(YES, confirm.answer == Answer::Yes, Color::Red),
+            Span::raw("  "),
+            button(NO, confirm.answer == Answer::No, Color::Green),
         ]),
         Line::from(""),
-        dim(if ready {
-            " Enter deletes   Esc cancels"
-        } else {
-            " Esc cancels"
-        }),
+        dim(" y or n picks   Enter answers   Esc cancels"),
     ];
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" delete session ")),
         area,
     );
+
+    // The button row is the sixth line, one row below the border, and the two labels
+    // sit after the leading space with two spaces between them. `ui::tests` renders
+    // the form and reads the buffer back, so these offsets never drift silently.
+    let row = area.y + 1 + 5;
+    if row >= area.y + area.height.saturating_sub(1) {
+        return Vec::new();
+    }
+    let left = area.x + 2;
+    let yes = u16::try_from(YES.len()).unwrap_or(0);
+    vec![
+        (Rect::new(left, row, yes, 1), Answer::Yes),
+        (
+            Rect::new(left + yes + 2, row, u16::try_from(NO.len()).unwrap_or(0), 1),
+            Answer::No,
+        ),
+    ]
+}
+
+/// The two button labels. The brackets keep them reading as buttons on a terminal
+/// that shows no color.
+const YES: &str = "[ yes ]";
+const NO: &str = "[ no ]";
+
+/// One button. The cursor is a filled label, and the rest is an outline.
+fn button(label: &str, focused: bool, color: Color) -> Span<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Span::styled(label.to_string(), style)
 }
 
 /// Marks the selected cells by reversing them, over whatever the child drew.
@@ -546,11 +580,65 @@ pub fn panel_size(panel: Rect) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
+    // Test code may use `expect` with a message. Library code may not.
+    #![allow(clippy::expect_used)]
+
     use super::*;
+    use crate::app::ConfirmDelete;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn a_long_name_is_truncated_with_an_ellipsis() {
         assert_eq!(truncate("feature-branch", 6), "featu…");
         assert_eq!(truncate("short", 10), "short");
+    }
+
+    /// The button rectangles are computed from the layout by hand, so this renders the
+    /// form and reads the buffer back to prove each rectangle covers its own label.
+    #[test]
+    fn each_confirmation_button_rectangle_covers_its_label() {
+        let confirm = ConfirmDelete {
+            index: 0,
+            name: "feat A".into(),
+            answer: Answer::No,
+        };
+        let panel = Rect::new(10, 0, 70, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 20)).expect("the test backend starts");
+        let mut buttons = Vec::new();
+        terminal
+            .draw(|f| buttons = draw_confirm(f, &confirm, panel))
+            .expect("the form draws");
+
+        let buffer = terminal.backend().buffer();
+        let read = |rect: Rect| {
+            (rect.x..rect.x + rect.width)
+                .filter_map(|x| buffer.cell(Position { x, y: rect.y }))
+                .map(|cell| cell.symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(read(buttons[0].0), "[ yes ]");
+        assert_eq!(buttons[0].1, Answer::Yes);
+        assert_eq!(read(buttons[1].0), "[ no ]");
+        assert_eq!(buttons[1].1, Answer::No);
+    }
+
+    #[test]
+    fn a_panel_too_short_for_the_button_row_reports_no_button() {
+        let confirm = ConfirmDelete {
+            index: 0,
+            name: "feat A".into(),
+            answer: Answer::No,
+        };
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 20)).expect("the test backend starts");
+        let mut buttons = Vec::new();
+        terminal
+            .draw(|f| buttons = draw_confirm(f, &confirm, Rect::new(10, 0, 70, 4)))
+            .expect("the form draws");
+
+        assert!(buttons.is_empty(), "no click lands on a row never drawn");
     }
 }

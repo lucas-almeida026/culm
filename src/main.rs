@@ -136,7 +136,7 @@ fn run(
                 Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(&k, &deps)?,
                 Event::Paste(text) => app.on_paste(&text)?,
                 Event::Mouse(m) => {
-                    app.on_mouse(m.kind, m.column, m.row, &hit);
+                    app.on_mouse(m.kind, m.column, m.row, &hit, &deps);
                     // Only the loop owns the output stream, so the copy is written
                     // here. One escape, and no cursor movement, so the drawn buffer
                     // stays valid.

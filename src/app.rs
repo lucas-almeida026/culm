@@ -92,18 +92,27 @@ pub struct NewSession {
     pub field: Field,
 }
 
-/// The delete confirmation. Deletion has no undo, so the user retypes the name.
+/// Which button of a confirmation holds the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Answer {
+    Yes,
+    /// The default. Deletion has no undo, so a stray `Enter` cancels.
+    #[default]
+    No,
+}
+
+/// The delete confirmation. Two buttons, and the cursor starts on `No`.
 #[derive(Debug, Clone)]
 pub struct ConfirmDelete {
     pub index: usize,
     pub name: String,
-    pub typed: String,
+    pub answer: Answer,
 }
 
 impl ConfirmDelete {
     #[must_use]
     pub fn confirmed(&self) -> bool {
-        self.typed == self.name
+        self.answer == Answer::Yes
     }
 }
 
@@ -517,10 +526,8 @@ impl App {
                 }
                 return Ok(());
             }
-            Some(Modal::ConfirmDelete(confirm)) => {
-                confirm.typed.push_str(text);
-                return Ok(());
-            }
+            // A paste is not an answer, so the confirmation ignores it.
+            Some(Modal::ConfirmDelete(_)) => return Ok(()),
             Some(Modal::Rename(rename)) => {
                 rename.name.push_str(text);
                 return Ok(());
@@ -658,7 +665,7 @@ impl App {
         self.modal = Some(Modal::ConfirmDelete(ConfirmDelete {
             index,
             name: entry.record.name.clone(),
-            typed: String::new(),
+            answer: Answer::No,
         }));
     }
 
@@ -750,14 +757,20 @@ impl App {
             Some(Modal::ConfirmDelete(confirm)) => {
                 match key.code {
                     KeyCode::Esc => self.modal = None,
-                    KeyCode::Backspace => {
-                        confirm.typed.pop();
+                    // A letter moves the cursor onto a button. It never answers on its
+                    // own, so deleting still takes two keys.
+                    KeyCode::Char('y' | 'Y') => confirm.answer = Answer::Yes,
+                    KeyCode::Char('n' | 'N') => confirm.answer = Answer::No,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                        confirm.answer = match confirm.answer {
+                            Answer::Yes => Answer::No,
+                            Answer::No => Answer::Yes,
+                        };
                     }
-                    KeyCode::Char(c) => confirm.typed.push(c),
                     KeyCode::Enter => {
                         let confirm = confirm.clone();
+                        self.modal = None;
                         if confirm.confirmed() {
-                            self.modal = None;
                             self.delete_session(confirm.index, deps)?;
                         }
                     }
@@ -1048,8 +1061,22 @@ impl App {
         column: u16,
         row: u16,
         hit: &crate::ui::HitBox,
+        deps: &Deps<'_>,
     ) {
         let at = Position { x: column, y: row };
+        // A confirmation sits on top of everything, so its buttons answer first.
+        if let MouseEventKind::Down(MouseButton::Left) = kind
+            && let Some(Modal::ConfirmDelete(confirm)) = self.modal.as_mut()
+            && let Some((_, answer)) = hit.buttons.iter().find(|(rect, _)| rect.contains(at))
+        {
+            confirm.answer = *answer;
+            let confirm = confirm.clone();
+            self.modal = None;
+            if confirm.confirmed() {
+                let _ = self.delete_session(confirm.index, deps);
+            }
+            return;
+        }
         match kind {
             MouseEventKind::Down(MouseButton::Left) if column == hit.separator_col => {
                 self.dragging = true;

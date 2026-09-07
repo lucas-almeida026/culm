@@ -638,9 +638,16 @@ fn a_click_on_a_sidebar_row_switches_the_visible_session() {
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
         search_row: None,
+        ..HitBox::default()
     };
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 2, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        2,
+        &hit,
+        &f.deps(),
+    );
 
     assert_eq!(app.focused_entry(), Some(0));
 }
@@ -656,21 +663,52 @@ fn dragging_the_separator_resizes_the_sidebar_within_its_limits() {
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
         search_row: None,
+        ..HitBox::default()
     };
     let _ = &f;
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 29, 5, &hit);
-    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), 45, 5, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        29,
+        5,
+        &hit,
+        &f.deps(),
+    );
+    app.on_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        45,
+        5,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(app.sidebar_width(), 45);
 
-    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), 200, 5, &hit);
+    app.on_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        200,
+        5,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(app.sidebar_width(), culm::app::SIDEBAR_MAX);
 
-    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), 1, 5, &hit);
+    app.on_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        1,
+        5,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(app.sidebar_width(), culm::app::SIDEBAR_MIN);
 
-    app.on_mouse(MouseEventKind::Up(MouseButton::Left), 1, 5, &hit);
-    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), 50, 5, &hit);
+    app.on_mouse(MouseEventKind::Up(MouseButton::Left), 1, 5, &hit, &f.deps());
+    app.on_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        50,
+        5,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(
         app.sidebar_width(),
         culm::app::SIDEBAR_MIN,
@@ -694,9 +732,16 @@ fn a_click_inside_the_panel_never_changes_the_focus() {
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
         search_row: None,
+        ..HitBox::default()
     };
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 60, 2, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        60,
+        2,
+        &hit,
+        &f.deps(),
+    );
 
     assert_eq!(app.focused_entry(), Some(1));
 }
@@ -921,12 +966,25 @@ fn a_click_on_the_shell_row_focuses_the_shell() {
         panel: Rect::new(30, 0, 50, 20),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
         search_row: None,
+        ..HitBox::default()
     };
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 4, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        4,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(app.focus(), Focus::Entry(0));
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 1, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        1,
+        &hit,
+        &f.deps(),
+    );
     assert_eq!(app.focus(), Focus::Shell);
 }
 
@@ -941,10 +999,8 @@ fn deleting_a_paused_session_removes_its_record_and_transcript() {
 
     app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
         .expect("the confirmation opens");
-    for c in "feat A".chars() {
-        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
-            .expect("the name is typed");
-    }
+    app.on_key(&key(KeyCode::Char('y'), KeyModifiers::NONE), &f.deps())
+        .expect("yes is picked");
     app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
         .expect("the delete runs");
 
@@ -995,26 +1051,134 @@ fn delete_is_refused_while_the_session_runs() {
     assert!(f.store.removed_transcripts().is_empty());
 }
 
-#[test]
-fn the_wrong_name_deletes_nothing() {
-    let f = Fakes::new();
+/// Opens the confirmation on a paused session named `one`.
+fn confirming_delete(f: &Fakes) -> App {
     let mut app = App::new(project());
     app.create_session(&form("one", [false, false]), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
-
     app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
         .expect("the confirmation opens");
-    for c in "onx".chars() {
-        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
-            .expect("the name is typed");
-    }
+    app
+}
+
+#[test]
+fn the_confirmation_starts_on_no() {
+    let f = Fakes::new();
+    let app = confirming_delete(&f);
+
+    assert_eq!(
+        app.confirm_delete()
+            .map(culm::app::ConfirmDelete::confirmed),
+        Some(false),
+        "a stray Enter must never delete"
+    );
+}
+
+#[test]
+fn enter_alone_cancels_because_no_holds_the_cursor() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+
     app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
         .expect("enter is handled");
 
+    assert!(app.confirm_delete().is_none(), "the form closes");
     assert_eq!(app.entries().len(), 1, "the session survives");
     assert!(f.store.removed_transcripts().is_empty());
-    assert!(app.confirm_delete().is_some(), "the form stays open");
+}
+
+#[test]
+fn n_then_enter_cancels() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+
+    app.on_key(&key(KeyCode::Char('y'), KeyModifiers::NONE), &f.deps())
+        .expect("yes is picked");
+    app.on_key(&key(KeyCode::Char('n'), KeyModifiers::NONE), &f.deps())
+        .expect("no is picked back");
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("enter is handled");
+
+    assert_eq!(app.entries().len(), 1);
+    assert!(f.store.removed_transcripts().is_empty());
+}
+
+#[test]
+fn a_letter_alone_never_deletes() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+
+    app.on_key(&key(KeyCode::Char('y'), KeyModifiers::NONE), &f.deps())
+        .expect("yes is picked");
+
+    assert!(app.confirm_delete().is_some(), "the form is still open");
+    assert_eq!(app.entries().len(), 1, "deleting still takes the Enter");
+}
+
+#[test]
+fn an_arrow_moves_between_the_buttons() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+
+    app.on_key(&key(KeyCode::Left, KeyModifiers::NONE), &f.deps())
+        .expect("the arrow is handled");
+    assert_eq!(
+        app.confirm_delete()
+            .map(culm::app::ConfirmDelete::confirmed),
+        Some(true)
+    );
+
+    app.on_key(&key(KeyCode::Tab, KeyModifiers::NONE), &f.deps())
+        .expect("tab is handled");
+    assert_eq!(
+        app.confirm_delete()
+            .map(culm::app::ConfirmDelete::confirmed),
+        Some(false)
+    );
+}
+
+#[test]
+fn a_paste_never_answers_the_confirmation() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+
+    app.on_paste("yes").expect("the paste is handled");
+
+    assert!(app.confirm_delete().is_some(), "the form is still open");
+    assert_eq!(app.entries().len(), 1);
+}
+
+#[test]
+fn a_click_on_yes_deletes_and_a_click_on_no_does_not() {
+    let f = Fakes::new();
+    let mut app = confirming_delete(&f);
+    let mut hit = panel_hit();
+    hit.buttons = vec![
+        (Rect::new(40, 6, 5, 1), culm::app::Answer::Yes),
+        (Rect::new(47, 6, 4, 1), culm::app::Answer::No),
+    ];
+
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        48,
+        6,
+        &hit,
+        &f.deps(),
+    );
+    assert!(app.confirm_delete().is_none(), "the form closes");
+    assert_eq!(app.entries().len(), 1, "no deletes nothing");
+
+    let mut app = confirming_delete(&f);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        41,
+        6,
+        &hit,
+        &f.deps(),
+    );
+    assert!(app.entries().is_empty(), "yes deletes");
+    assert_eq!(f.store.removed_transcripts().len(), 1);
 }
 
 #[test]
@@ -1169,6 +1333,7 @@ fn panel_hit() -> HitBox {
         panel: Rect::new(30, 0, 50, 10),
         inner: culm::ui::inner_of(Rect::new(30, 0, 50, 10)),
         search_row: None,
+        ..HitBox::default()
     }
 }
 
@@ -1210,7 +1375,7 @@ fn the_wheel_scrolls_the_visible_session_back() {
     assert!(screen_of(&app).contains("line-199"));
 
     for _ in 0..4 {
-        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
     }
 
     assert_eq!(scrollback_of(&app), 12, "three lines per notch");
@@ -1220,7 +1385,7 @@ fn the_wheel_scrolls_the_visible_session_back() {
     );
 
     for _ in 0..4 {
-        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit);
+        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit, &f.deps());
     }
     assert_eq!(scrollback_of(&app), 0);
     assert!(screen_of(&app).contains("line-199"));
@@ -1232,7 +1397,7 @@ fn a_keystroke_snaps_the_session_back_to_the_bottom() {
     let mut app = scrolled_session(&f);
     let hit = panel_hit();
     for _ in 0..4 {
-        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
     }
     assert!(scrollback_of(&app) > 0);
 
@@ -1249,7 +1414,7 @@ fn the_wheel_over_the_sidebar_scrolls_nothing() {
     let mut app = scrolled_session(&f);
     let hit = panel_hit();
 
-    app.on_mouse(MouseEventKind::ScrollUp, 5, 3, &hit);
+    app.on_mouse(MouseEventKind::ScrollUp, 5, 3, &hit, &f.deps());
 
     assert_eq!(scrollback_of(&app), 0, "the wheel belongs to the panel");
 }
@@ -1275,7 +1440,7 @@ fn scrolling_stops_at_both_ends_of_the_buffer() {
     let hit = panel_hit();
 
     for _ in 0..200 {
-        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
     }
     let top = scrollback_of(&app);
     assert!(top > 0, "the buffer holds history");
@@ -1283,7 +1448,7 @@ fn scrolling_stops_at_both_ends_of_the_buffer() {
     assert!(screen_of(&app).contains("line-000"));
 
     for _ in 0..500 {
-        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit);
+        app.on_mouse(MouseEventKind::ScrollDown, 40, 5, &hit, &f.deps());
     }
     assert_eq!(scrollback_of(&app), 0, "the view stops at the live output");
 }
@@ -1296,7 +1461,7 @@ fn the_wheel_does_nothing_while_a_form_is_open() {
     app.on_key(&key(KeyCode::Char('N'), KeyModifiers::ALT), &f.deps())
         .expect("the form opens");
 
-    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
 
     assert_eq!(scrollback_of(&app), 0);
 }
@@ -1315,7 +1480,7 @@ fn the_wheel_goes_to_a_child_that_asked_for_the_mouse() {
     let mut app = scrolled_session(&f);
     let hit = panel_hit();
 
-    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
 
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
     assert_eq!(
@@ -1336,7 +1501,7 @@ fn the_wheel_down_reaches_the_child_as_the_other_button() {
     let mut app = scrolled_session(&f);
     let hit = panel_hit();
 
-    app.on_mouse(MouseEventKind::ScrollDown, 31, 1, &hit);
+    app.on_mouse(MouseEventKind::ScrollDown, 31, 1, &hit, &f.deps());
 
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
     assert_eq!(
@@ -1352,7 +1517,7 @@ fn the_wheel_still_scrolls_culm_when_the_child_wants_no_mouse() {
     let mut app = scrolled_session(&f);
     let hit = panel_hit();
 
-    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
 
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
     assert_eq!(pty.written_utf8(), "", "a shell gets no mouse bytes");
@@ -1541,10 +1706,17 @@ fn at(row: u16, col: u16) -> (u16, u16) {
     (31 + col, 1 + row)
 }
 
-fn drag(app: &mut App, hit: &HitBox, from: (u16, u16), to: (u16, u16)) {
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1, hit);
-    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1, hit);
-    app.on_mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1, hit);
+fn drag(app: &mut App, f: &Fakes, hit: &HitBox, from: (u16, u16), to: (u16, u16)) {
+    let d = f.deps();
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        from.0,
+        from.1,
+        hit,
+        &d,
+    );
+    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1, hit, &d);
+    app.on_mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1, hit, &d);
 }
 
 #[test]
@@ -1553,7 +1725,7 @@ fn a_drag_over_the_panel_copies_the_text_under_it() {
     let mut app = text_session(&f, "second line");
     let hit = panel_hit();
 
-    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
 
     assert_eq!(app.clipboard(), "hello");
     assert_eq!(app.take_copy().as_deref(), Some("hello"));
@@ -1567,7 +1739,7 @@ fn a_drag_across_rows_copies_both_rows() {
     let mut app = text_session(&f, "second line");
     let hit = panel_hit();
 
-    drag(&mut app, &hit, at(0, 6), at(1, 5));
+    drag(&mut app, &f, &hit, at(0, 6), at(1, 5));
 
     assert_eq!(app.clipboard(), "world\nsecond");
 }
@@ -1578,7 +1750,7 @@ fn a_drag_backwards_copies_the_same_text() {
     let mut app = text_session(&f, "second line");
     let hit = panel_hit();
 
-    drag(&mut app, &hit, at(0, 4), at(0, 0));
+    drag(&mut app, &f, &hit, at(0, 4), at(0, 0));
 
     assert_eq!(app.clipboard(), "hello");
 }
@@ -1589,7 +1761,7 @@ fn a_click_without_a_drag_selects_nothing() {
     let mut app = text_session(&f, "hello world");
     let hit = panel_hit();
 
-    drag(&mut app, &hit, at(0, 3), at(0, 3));
+    drag(&mut app, &f, &hit, at(0, 3), at(0, 3));
 
     assert!(app.selection().is_none());
     assert_eq!(app.take_copy(), None);
@@ -1601,7 +1773,7 @@ fn a_middle_click_pastes_the_last_copy_as_one_bracketed_block() {
     let f = Fakes::with_output(b"hello world\r\n");
     let mut app = text_session(&f, "hello world");
     let hit = panel_hit();
-    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
 
     app.on_mouse(
@@ -1609,6 +1781,7 @@ fn a_middle_click_pastes_the_last_copy_as_one_bracketed_block() {
         at(2, 2).0,
         at(2, 2).1,
         &hit,
+        &f.deps(),
     );
 
     assert_eq!(pty.written_utf8(), "\x1b[200~hello\x1b[201~");
@@ -1626,6 +1799,7 @@ fn a_middle_click_with_nothing_copied_sends_nothing() {
         at(0, 0).0,
         at(0, 0).1,
         &hit,
+        &f.deps(),
     );
 
     assert_eq!(pty.written_utf8(), "");
@@ -1636,7 +1810,7 @@ fn a_keystroke_clears_the_selection() {
     let f = Fakes::with_output(b"hello world\r\n");
     let mut app = text_session(&f, "hello world");
     let hit = panel_hit();
-    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
     assert!(app.selection().is_some());
 
     app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
@@ -1655,9 +1829,9 @@ fn the_wheel_clears_the_selection_because_the_view_moved() {
     let f = Fakes::with_output(&numbered_lines());
     let mut app = text_session(&f, "line-199");
     let hit = panel_hit();
-    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
 
-    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
 
     assert!(app.selection().is_none());
 }
@@ -1668,7 +1842,7 @@ fn a_drag_over_the_sidebar_never_copies() {
     let mut app = text_session(&f, "hello world");
     let hit = panel_hit();
 
-    drag(&mut app, &hit, (5, 2), (5, 6));
+    drag(&mut app, &f, &hit, (5, 2), (5, 6));
 
     assert!(app.selection().is_none());
     assert_eq!(app.take_copy(), None);
@@ -1682,7 +1856,7 @@ fn no_selection_starts_while_a_form_is_open() {
     app.on_key(&key(KeyCode::Char('N'), KeyModifiers::ALT), &f.deps())
         .expect("the form opens");
 
-    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
 
     assert!(app.selection().is_none());
     assert_eq!(app.take_copy(), None);
@@ -1696,7 +1870,7 @@ fn a_selection_over_the_shell_copies_from_the_shell() {
     let shell = app.shell().expect("the shell runs");
     assert!(shell.wait_for_text("a shell prompt", Duration::from_secs(1)));
 
-    drag(&mut app, &hit, at(0, 0), at(0, 6));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 6));
 
     assert_eq!(app.clipboard(), "a shell");
 }
@@ -1879,7 +2053,13 @@ fn a_click_on_the_search_row_focuses_the_box() {
     let mut hit = panel_hit();
     hit.search_row = Some(7);
 
-    app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 7, &hit);
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        7,
+        &hit,
+        &f.deps(),
+    );
 
     assert!(app.filter_focused());
 }
