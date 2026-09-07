@@ -183,71 +183,72 @@ The model for the interface is a micro-frontend host. Each session behaves as a 
 91. Clear the selection on the next keystroke, on a scroll, and on a focus change. A press and a release on one cell is a click, and it selects nothing.
 92. Show an empty state. With no project registered, show the command that registers a project. With no session in the open project, show the binding that creates a session.
 93. Run on a terminal that reports no keyboard enhancement. Show the active keyboard mode in the sidebar.
-94. Split the bottom bar in two. Keep the pointer to the shortcut table on the left, unchanged at all times, and give the rest to the message of whatever last happened.
-95. Show every reserved binding, and what each one does, in a table on `Alt+Shift+H`. Close it with the same binding, with `Esc`, or with `Enter`. Send no key to a child while it is open.
-96. Show a search box above the paused list. Filter the paused list by name on every keystroke, ignoring case.
-97. Send no key to a child while the search box holds the focus. `Enter` focuses the first match and returns the keys to the panel. `Esc` clears the filter and returns the keys to the panel.
-98. Keep the filter after `Enter`, so that the list still shows what was searched for.
+94. Split the bottom bar in two. Hold the pointer to the shortcut table against the left edge, unchanged at all times, and hold the message of whatever last happened against the right edge.
+95. Keep the room the hook warning needs when the bar runs out of width. Shorten the transient message first, then the warning itself, because the warning names a command the user has to type.
+96. Show every reserved binding, and what each one does, in a table on `Alt+Shift+H`. Close it with the same binding, with `Esc`, or with `Enter`. Send no key to a child while it is open.
+97. Show a search box above the paused list. Filter the paused list by name on every keystroke, ignoring case.
+98. Send no key to a child while the search box holds the focus. `Enter` focuses the first match and returns the keys to the panel. `Esc` clears the filter and returns the keys to the panel.
+99. Keep the filter after `Enter`, so that the list still shows what was searched for.
 
 ### Scrollback
 
-99. Forward a wheel notch to a child that asked for mouse reporting, and let that child scroll its own history. Claude Code asks for it, and holds the conversation itself.
-100. Hold the output of a child that asked for no mouse reporting in a scrollback buffer, and let the user look back through it. A shell is such a child.
-101. Scroll with the mouse wheel over the panel. Leave the wheel over the sidebar alone.
-102. Scroll half a panel with `Shift+PageUp` and `Shift+PageDown`. Leave plain `PageUp` and `PageDown` to the child.
-103. Return the view to the live output on the first keystroke the user sends, as a terminal does.
-104. Hold the view still while output arrives, so that a busy session never drags the view.
-105. Show the offset in the panel title while the view sits above the live output, so that a held panel never reads as a stalled session.
-106. Scroll nothing while a form is open.
+100. Forward a wheel notch to a child that asked for mouse reporting, and let that child scroll its own history. Claude Code asks for it, and holds the conversation itself.
+101. Hold the output of a child that asked for no mouse reporting in a scrollback buffer, and let the user look back through it. A shell is such a child.
+102. Scroll with the mouse wheel over the panel. Leave the wheel over the sidebar alone.
+103. Scroll half a panel with `Shift+PageUp` and `Shift+PageDown`. Leave plain `PageUp` and `PageDown` to the child.
+104. Return the view to the live output on the first keystroke the user sends, as a terminal does.
+105. Hold the view still while output arrives, so that a busy session never drags the view.
+106. Show the offset in the panel title while the view sits above the live output, so that a held panel never reads as a stalled session.
+107. Scroll nothing while a form is open.
 
 A child that paints its own viewport never lets a line scroll off the panel, so no
 scrollback accumulates for it and culm has nothing of its own to show. `vt100` also
-keeps no scrollback while a scroll region is active, in `grid.rs`. Requirement 99 is
-what makes such a session scrollable, and requirements 100 to 105 cover the rest.
+keeps no scrollback while a scroll region is active, in `grid.rs`. Requirement 100 is
+what makes such a session scrollable, and requirements 101 to 106 cover the rest.
 
 ### Keys
 
 Every reserved key stops belonging to the Claude Code process. Keep the reserved set small.
 
-107. Use `Alt` as the only leader. Reserve no function key.
-108. Reserve `Ctrl+q` for quit.
-109. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
-110. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
-111. Create a session with `Alt+Shift+N`. A new session starts active.
-112. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
-113. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
-114. Never swap position 0. The shell keeps that position for the life of the project.
-115. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
-116. Toggle nerd mode with `Alt+Shift+D`.
-117. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 44 reaches the user.
-118. Rename the focused session with `Alt+Shift+R`.
-119. Focus the search box with `Alt+Shift+F`. A click on the search row focuses it as well.
-120. Open the shortcut table with `Alt+Shift+H`.
-121. Address the active half with a digit. Reach a paused session with a mouse click, or through the search box.
-122. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
+108. Use `Alt` as the only leader. Reserve no function key.
+109. Reserve `Ctrl+q` for quit.
+110. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
+111. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
+112. Create a session with `Alt+Shift+N`. A new session starts active.
+113. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
+114. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
+115. Never swap position 0. The shell keeps that position for the life of the project.
+116. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
+117. Toggle nerd mode with `Alt+Shift+D`.
+118. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 44 reaches the user.
+119. Rename the focused session with `Alt+Shift+R`.
+120. Focus the search box with `Alt+Shift+F`. A click on the search row focuses it as well.
+121. Open the shortcut table with `Alt+Shift+H`.
+122. Address the active half with a digit. Reach a paused session with a mouse click, or through the search box.
+123. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
 
 ### Configuration
 
-123. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
-124. Hold every key binding in the configuration file. Ship the defaults in the binary.
-125. Override one binding without restating the rest.
-126. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
-127. Read the nerd mode default from the same file.
+124. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
+125. Hold every key binding in the configuration file. Ship the defaults in the binary.
+126. Override one binding without restating the rest.
+127. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
+128. Read the nerd mode default from the same file.
 
 ### Statistics
 
-128. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
-129. Sample memory once per second. Render the last sample.
-130. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
-131. Reach `/proc` through a trait, so that a test supplies a fake.
+129. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
+130. Sample memory once per second. Render the last sample.
+131. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
+132. Reach `/proc` through a trait, so that a test supplies a fake.
 
 One Claude Code process measured about 436 MB of resident memory on 2026-09-02. Memory, and not render cost, is the limit on the session count.
 
 ### Persistence
 
-132. On closing a project, pause every session and record which sessions were active.
-133. On opening a project, restore both halves of the session list to the recorded state.
-134. Survive a reboot through the saved state, because a reboot ends every terminal process.
+133. On closing a project, pause every session and record which sessions were active.
+134. On opening a project, restore both halves of the session list to the recorded state.
+135. Survive a reboot through the saved state, because a reboot ends every terminal process.
 
 ## Out of scope
 

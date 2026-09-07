@@ -322,8 +322,8 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 /// where the bindings are without the bar carrying all of them.
 const HELP_HINT: &str = " press Alt+Shift+H for shortcuts ";
 
-/// The bottom bar. The left half points at the help, and the right half carries
-/// whatever last happened.
+/// The bottom bar. The pointer to the help sits hard against the left edge, and
+/// whatever last happened sits hard against the right edge.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let hint_width = u16::try_from(HELP_HINT.chars().count()).unwrap_or(0);
     let columns =
@@ -336,18 +336,48 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         columns[0],
     );
 
-    let mut spans = vec![Span::styled(
-        format!(" {}", app.status()),
-        Style::default().fg(Color::Yellow),
-    )];
-    if !app.hooks_installed() {
+    // One column is kept back, so the text never touches the last column.
+    let width = usize::from(columns[1].width).saturating_sub(1);
+    // The warning names a command the user has to run, so it keeps its room and the
+    // transient message gives way. Right aligned text loses its tail when it
+    // overflows, and the tail is the command.
+    let warning = if app.hooks_installed() {
+        ""
+    } else if WARN_LONG.chars().count() <= width {
+        WARN_LONG
+    } else {
+        WARN_SHORT
+    };
+    let gap = if warning.is_empty() { 0 } else { 3 };
+    let room = width.saturating_sub(warning.chars().count() + gap);
+
+    let mut spans = Vec::new();
+    if !app.status().is_empty() && room > 0 {
         spans.push(Span::styled(
-            "   markers off, run: culm hooks install",
-            Style::default().fg(Color::Red),
+            truncate(app.status(), room),
+            Style::default().fg(Color::Yellow),
         ));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), columns[1]);
+    if !warning.is_empty() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        spans.push(Span::styled(warning, Style::default().fg(Color::Red)));
+    }
+    if spans.is_empty() {
+        return;
+    }
+    spans.push(Span::raw(" "));
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).right_aligned(),
+        columns[1],
+    );
 }
+
+/// What the bar says when the hooks are missing. The short form is used when the
+/// long one does not fit, because a clipped command helps nobody.
+const WARN_LONG: &str = "markers off, run: culm hooks install";
+const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
 const SHORTCUTS: [(&str, &str); 14] = [
@@ -713,6 +743,84 @@ mod tests {
         for (keys, does) in SHORTCUTS {
             assert!(text.contains(keys), "{keys} is missing from the table");
             assert!(text.contains(does), "the description of {keys} is cut off");
+        }
+    }
+
+    /// Renders the whole frame and returns its bottom row, which is the bar.
+    fn status_bar(width: u16, hooks_installed: bool) -> String {
+        use crate::app::{App, Deps, NewSession};
+        use crate::project::Project;
+        use crate::testing::{FakeClock, FakeGit, FakeSpawner, MemoryStore};
+
+        let spawner = FakeSpawner::new(Vec::new());
+        let git = FakeGit::default();
+        let store = MemoryStore::new();
+        let clock = FakeClock::new(1);
+        let deps = Deps {
+            spawner: &spawner,
+            git: &git,
+            store: &store,
+            clock: &clock,
+        };
+        let mut app = App::new(Project::new("spm", "/home/x/spm"));
+        // An empty name is refused, which is how a status reaches the bar here.
+        app.create_session(&NewSession::default(), &deps)
+            .expect("the form is handled");
+        app.set_hooks_installed(hooks_installed);
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, 8)).expect("the test backend starts");
+        terminal
+            .draw(|f| {
+                draw(f, &app);
+            })
+            .expect("the frame draws");
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .filter_map(|x| buffer.cell(Position { x, y: 7 }))
+            .map(|c| c.symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_hint_holds_the_left_edge_and_the_status_holds_the_right() {
+        let bar = status_bar(90, true);
+        assert!(bar.starts_with(HELP_HINT), "the hint opens the bar");
+        assert!(
+            bar.trim_end().ends_with("a session needs a name"),
+            "the status closes it, and got: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_bar_is_only_the_hint_while_nothing_has_happened() {
+        use crate::app::App;
+        use crate::project::Project;
+        let app = App::new(Project::new("spm", "/home/x/spm"));
+        let mut terminal = Terminal::new(TestBackend::new(90, 8)).expect("the test backend starts");
+        terminal
+            .draw(|f| {
+                draw(f, &app);
+            })
+            .expect("the frame draws");
+        let buffer = terminal.backend().buffer();
+        let bar: String = (0..90)
+            .filter_map(|x| buffer.cell(Position { x, y: 7 }))
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert_eq!(bar.trim_end(), HELP_HINT.trim_end());
+    }
+
+    /// The warning names a command, so a narrow terminal must drop the transient
+    /// message or shorten the warning rather than cut the command in half.
+    #[test]
+    fn the_hook_warning_is_never_cut_in_half() {
+        for width in [120, 90, 78, 60, 46] {
+            let bar = status_bar(width, false);
+            assert!(
+                bar.contains(WARN_LONG) || bar.contains(WARN_SHORT),
+                "width {width} cut the warning: {bar:?}"
+            );
         }
     }
 
