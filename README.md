@@ -6,7 +6,7 @@ A grove of bamboo sends many culms up from one shared rhizome. Each stem stands 
 
 ## Status
 
-Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 220 cases through the fakes.
+Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 224 cases through the fakes.
 
 Not built yet: archive, session reordering, and the TOML configuration file.
 
@@ -39,6 +39,14 @@ Inside the interface, `Alt+Shift+H` shows the table of every binding. The bottom
 The paused list is ordered by last use, newest first. `Alt+Shift+F` puts the cursor in the search box above it, which filters by name on every keystroke. `Enter` lands on the first match, and `Esc` clears the filter.
 
 Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session.
+
+Shift+Enter inserts a newline in a Claude Code prompt rather than submitting it. kitty does not report that key to an application on its own, so it needs one line in `kitty.conf`:
+
+```
+map shift+enter send_text all \x1b\r
+```
+
+Alt+Enter does the same thing and needs no configuration. [FINDINGS.md](FINDINGS.md) records why.
 
 The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
 

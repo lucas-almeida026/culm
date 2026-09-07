@@ -82,6 +82,12 @@ pub fn encode(k: &KeyEvent) -> Option<Vec<u8>> {
             let mut b = [0u8; 4];
             c.encode_utf8(&mut b).as_bytes().to_vec()
         }
+        // Shift+Enter carries no legacy encoding of its own, so a plain terminal
+        // collapses it onto Enter and the prompt submits. Claude Code's own
+        // `/terminal-setup` binds it to ESC then CR, checked on 2026-09-07 against
+        // the CLI version in FINDINGS.md, so that is what culm sends. With Alt also
+        // held the arm below adds the same prefix, so the two agree.
+        KeyCode::Enter if shift && !alt => vec![0x1b, b'\r'],
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
@@ -179,6 +185,44 @@ mod tests {
     fn control_letter_becomes_a_control_byte() {
         let bytes = encode(&key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(bytes, Some(vec![0x12]));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_instead_of_submitting() {
+        assert_eq!(
+            encode(&key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(vec![0x1b, b'\r']),
+            "Claude Code binds shift+enter to ESC then CR in its own terminal setup"
+        );
+    }
+
+    #[test]
+    fn plain_enter_still_submits() {
+        assert_eq!(
+            encode(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(vec![b'\r'])
+        );
+    }
+
+    #[test]
+    fn alt_enter_and_shift_enter_agree() {
+        let alt = encode(&key(KeyCode::Enter, KeyModifiers::ALT));
+        let shift = encode(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        let both = encode(&key(
+            KeyCode::Enter,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(alt, shift, "both mean a newline that does not submit");
+        assert_eq!(both, shift, "holding both never doubles the prefix");
+    }
+
+    #[test]
+    fn shift_enter_is_not_a_host_action() {
+        assert_eq!(
+            host_action(&key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            None,
+            "the key belongs to the child"
+        );
     }
 
     #[test]

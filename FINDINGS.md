@@ -122,6 +122,20 @@ recorded above.
 - A transcript directory also holds a `memory` directory, so only a `<uuid>.jsonl` file is a session.
 - The `spm` directory held 126 MB across its transcripts, with one file of 18 MB. An import therefore reads each file once, and the interface never reads one.
 
+## Shift+Enter, and why the terminal has to help
+
+Checked on 2026-09-07 against Claude Code 2.1.263, kitty 0.32.2, and crossterm 0.29.
+
+- Claude Code binds Shift+Enter to **`ESC` then `CR`**. Its own `/terminal-setup` writes `"args": {"text": "\u001b\r"}` into the VS Code keybindings, which is the sequence it asks a terminal to send for a newline that does not submit. `culm::keys::encode` now sends exactly that.
+- Claude Code decides what the terminal is from `$TERM` alone (`TERM` holding `kitty` means kitty, `xterm-ghostty` means ghostty). culm spawns every child with `TERM=xterm-256color`, so Claude Code treats the panel as a plain xterm. On start it writes `CSI > 4 m` and `CSI < u`, which reset modifyOtherKeys and pop the kitty keyboard stack. It therefore expects legacy encodings and reports `supportsShiftEnter` as false.
+- **kitty does not report Shift+Enter to culm** under the flag culm pushes. The keyboard protocol says of Disambiguate escape codes: "The only exceptions are the Enter, Tab and Backspace keys which still generate the same bytes as in legacy mode". So kitty sends a bare `\r` and the modifier never reaches culm.
+- Only `REPORT_ALL_KEYS_AS_ESCAPE_CODES` reports Enter with its modifiers, and it costs too much: "text will not be sent, instead only key events are sent". Recovering the text needs `REPORT_ASSOCIATED_TEXT`, which crossterm does not implement. Enabling it would break composed input, such as a dead key producing an accented letter. culm does not enable it.
+- The way through is a terminal-side mapping, which is what `/terminal-setup` does for every editor it supports. In `kitty.conf`:
+
+      map shift+enter send_text all \x1b\r
+
+  kitty then sends `ESC CR`, crossterm reads it as Alt+Enter, and culm forwards `ESC CR` unchanged.
+
 ## Not verified
 
 - The kitty keyboard protocol path.
@@ -130,3 +144,4 @@ recorded above.
 - Any terminal other than kitty, and any platform other than Linux.
 - Selection, OSC 52 copy, and middle-click paste under a real terminal. OSC 52 inside tmux needs `set -g set-clipboard on`. kitty allows a clipboard write by default.
 - `ClaudeNamer`, which starts a real `claude` child. Every test drives `FakeNamer` instead.
+- Shift+Enter end to end in kitty with the mapping above. The sequence culm sends is unit tested, and the mapping is untested by hand.

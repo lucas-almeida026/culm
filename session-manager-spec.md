@@ -212,43 +212,44 @@ Every reserved key stops belonging to the Claude Code process. Keep the reserved
 
 108. Use `Alt` as the only leader. Reserve no function key.
 109. Reserve `Ctrl+q` for quit.
-110. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
-111. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
-112. Create a session with `Alt+Shift+N`. A new session starts active.
-113. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
-114. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
-115. Never swap position 0. The shell keeps that position for the life of the project.
-116. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
-117. Toggle nerd mode with `Alt+Shift+D`.
-118. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 44 reaches the user.
-119. Rename the focused session with `Alt+Shift+R`.
-120. Focus the search box with `Alt+Shift+F`. A click on the search row focuses it as well.
-121. Open the shortcut table with `Alt+Shift+H`.
-122. Address the active half with a digit. Reach a paused session with a mouse click, or through the search box.
-123. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
+110. Send `ESC` then `CR` for `Shift+Enter`, which is the sequence Claude Code binds to a newline that does not submit. Send a bare `CR` for `Enter`.
+111. Focus a session with `Alt` plus a digit from 1 to 9. Focus the shell with `Alt+0`.
+112. Hold at most nine active sessions in a project. Refuse a tenth, and report the limit. The shell is not a session and does not count, so a full project shows ten panels.
+113. Create a session with `Alt+Shift+N`. A new session starts active.
+114. Swap the focused session with position N under `Alt+Shift` plus a digit from 1 to 9.
+115. Swap with the last position when position N holds no session. With three sessions and position 1 focused, `Alt+Shift+9` swaps position 1 and position 3.
+116. Never swap position 0. The shell keeps that position for the life of the project.
+117. Pause the focused active session, and resume the focused paused session, with `Alt+Shift+P`.
+118. Toggle nerd mode with `Alt+Shift+D`.
+119. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 44 reaches the user.
+120. Rename the focused session with `Alt+Shift+R`.
+121. Focus the search box with `Alt+Shift+F`. A click on the search row focuses it as well.
+122. Open the shortcut table with `Alt+Shift+H`.
+123. Address the active half with a digit. Reach a paused session with a mouse click, or through the search box.
+124. Match a shifted digit on the legacy path. `Alt+Shift+1` arrives as `ESC` and `!`. The event carries no digit and no shift modifier. The character depends on the keyboard layout, so the configuration file holds the mapping.
 
 ### Configuration
 
-124. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
-125. Hold every key binding in the configuration file. Ship the defaults in the binary.
-126. Override one binding without restating the rest.
-127. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
-128. Read the nerd mode default from the same file.
+125. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
+126. Hold every key binding in the configuration file. Ship the defaults in the binary.
+127. Override one binding without restating the rest.
+128. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
+129. Read the nerd mode default from the same file.
 
 ### Statistics
 
-129. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
-130. Sample memory once per second. Render the last sample.
-131. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
-132. Reach `/proc` through a trait, so that a test supplies a fake.
+130. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
+131. Sample memory once per second. Render the last sample.
+132. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
+133. Reach `/proc` through a trait, so that a test supplies a fake.
 
 One Claude Code process measured about 436 MB of resident memory on 2026-09-02. Memory, and not render cost, is the limit on the session count.
 
 ### Persistence
 
-133. On closing a project, pause every session and record which sessions were active.
-134. On opening a project, restore both halves of the session list to the recorded state.
-135. Survive a reboot through the saved state, because a reboot ends every terminal process.
+134. On closing a project, pause every session and record which sessions were active.
+135. On opening a project, restore both halves of the session list to the recorded state.
+136. Survive a reboot through the saved state, because a reboot ends every terminal process.
 
 ## Out of scope
 
