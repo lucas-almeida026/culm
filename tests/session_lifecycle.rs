@@ -1395,3 +1395,119 @@ fn pausing_and_resuming_both_stamp_the_session() {
     app.toggle_pause(&f.deps()).expect("resume");
     assert_eq!(app.entries()[0].record.last_active, 200);
 }
+
+/// One active session named `one`, ready for a rename.
+fn one_session(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+    app
+}
+
+#[test]
+fn a_rename_changes_the_name_and_keeps_the_slug() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    let slug = app.entries()[0].record.slug.clone();
+
+    app.on_key(&key(KeyCode::Char('R'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+    assert_eq!(
+        app.rename_form().map(|r| r.name.as_str()),
+        Some("one"),
+        "the form starts from the current name"
+    );
+    for c in " renamed".chars() {
+        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
+            .expect("the key is handled");
+    }
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("the rename applies");
+
+    assert_eq!(app.entries()[0].record.name, "one renamed");
+    assert_eq!(
+        app.entries()[0].record.slug,
+        slug,
+        "the slug names the branch and the worktree, so it never moves"
+    );
+    let saved = f.store.project("spm").expect("the project is saved");
+    assert_eq!(saved.sessions[0].name, "one renamed");
+}
+
+#[test]
+fn a_paused_session_can_be_renamed() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    app.toggle_pause(&f.deps()).expect("pause");
+
+    app.on_key(&key(KeyCode::Char('R'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+    app.on_key(&key(KeyCode::Backspace, KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    app.on_key(&key(KeyCode::Char('2'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    app.on_key(&key(KeyCode::Enter, KeyModifiers::NONE), &f.deps())
+        .expect("the rename applies");
+
+    assert_eq!(app.entries()[0].record.name, "on2");
+}
+
+#[test]
+fn escape_leaves_the_old_name() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+
+    app.on_key(&key(KeyCode::Char('R'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+    app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    app.on_key(&key(KeyCode::Esc, KeyModifiers::NONE), &f.deps())
+        .expect("the form closes");
+
+    assert!(app.rename_form().is_none());
+    assert_eq!(app.entries()[0].record.name, "one");
+}
+
+#[test]
+fn an_empty_name_is_refused() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+
+    app.rename_session(0, "   ", &f.deps())
+        .expect("the rename is handled");
+
+    assert_eq!(app.entries()[0].record.name, "one");
+    assert_eq!(app.status(), "a session needs a name");
+}
+
+#[test]
+fn keys_go_to_the_rename_form_and_never_to_the_child() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+
+    app.on_key(&key(KeyCode::Char('R'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+    app.on_key(&key(KeyCode::Char('z'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+    app.on_paste("pasted").expect("the paste is handled");
+
+    assert_eq!(pty.written_utf8(), "", "no byte reached the session");
+    assert_eq!(
+        app.rename_form().map(|r| r.name.as_str()),
+        Some("onezpasted")
+    );
+}
+
+#[test]
+fn the_shell_has_no_name_to_rename() {
+    let f = Fakes::new();
+    let mut app = one_session(&f);
+    app.focus_shell();
+
+    app.on_key(&key(KeyCode::Char('R'), KeyModifiers::ALT), &f.deps())
+        .expect("the key is handled");
+
+    assert!(app.rename_form().is_none());
+    assert_eq!(app.status(), "the shell has no name");
+}

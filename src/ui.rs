@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, ConfirmDelete, Entry, Field, Focus, Modal};
+use crate::app::{App, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -61,6 +61,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
     match app.modal() {
         Some(Modal::NewSession(form)) => draw_form(f, app, form, panel),
         Some(Modal::ConfirmDelete(confirm)) => draw_confirm(f, confirm, panel),
+        Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
         None => {}
     }
 
@@ -276,7 +277,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+X delete   Ctrl+q quit",
+            " Alt+0 shell   Alt+<n> focus   Alt+Shift+N new   Alt+Shift+P pause   Alt+Shift+R rename   Alt+Shift+X delete   Ctrl+q quit",
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -429,6 +430,37 @@ fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) {
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" delete session ")),
+        area,
+    );
+}
+
+/// The rename form. Only the displayed name changes, so the hint says so and no
+/// confirmation is asked for.
+fn draw_rename(f: &mut Frame, rename: &Rename, panel: Rect) {
+    let width = 60.min(panel.width.saturating_sub(2));
+    let height = 7.min(panel.height);
+    let area = Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::raw(" name  "),
+            Span::styled(
+                format!("{} ", rename.name),
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ),
+        ]),
+        Line::from(""),
+        dim(" the branch and the worktree keep their names."),
+        Line::from(""),
+        dim(" Enter applies   Esc cancels"),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" rename session ")),
         area,
     );
 }

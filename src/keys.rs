@@ -17,6 +17,7 @@ pub enum HostAction {
     NewSession,
     TogglePause,
     DeleteSession,
+    RenameSession,
     ScrollUp,
     ScrollDown,
     NerdMode,
@@ -54,6 +55,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('p') if shift => Some(HostAction::TogglePause),
         KeyCode::Char('X') => Some(HostAction::DeleteSession),
         KeyCode::Char('x') if shift => Some(HostAction::DeleteSession),
+        KeyCode::Char('R') => Some(HostAction::RenameSession),
+        KeyCode::Char('r') if shift => Some(HostAction::RenameSession),
         KeyCode::Char('D') => Some(HostAction::NerdMode),
         KeyCode::Char('d') if shift => Some(HostAction::NerdMode),
         _ => None,
@@ -232,6 +235,17 @@ mod tests {
     }
 
     #[test]
+    fn alt_shift_r_renames_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('R'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::RenameSession));
+        assert_eq!(kitty, Some(HostAction::RenameSession));
+    }
+
+    #[test]
     fn a_bare_alt_letter_belongs_to_the_session() {
         assert_eq!(
             host_action(&key(KeyCode::Char('n'), KeyModifiers::ALT)),
@@ -244,6 +258,11 @@ mod tests {
         assert_eq!(
             host_action(&key(KeyCode::Char('x'), KeyModifiers::ALT)),
             None
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('r'), KeyModifiers::ALT)),
+            None,
+            "Alt+r is the readline yank, and it belongs to the child"
         );
     }
 

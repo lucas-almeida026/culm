@@ -107,11 +107,20 @@ impl ConfirmDelete {
     }
 }
 
+/// The rename form. The slug, the branch, and the worktree keep the names they were
+/// created with, because a path that moved would break a running session.
+#[derive(Debug, Clone)]
+pub struct Rename {
+    pub index: usize,
+    pub name: String,
+}
+
 /// The form on top of the panel, if any.
 #[derive(Debug, Clone)]
 pub enum Modal {
     NewSession(NewSession),
     ConfirmDelete(ConfirmDelete),
+    Rename(Rename),
 }
 
 #[derive(Debug)]
@@ -328,6 +337,15 @@ impl App {
         }
     }
 
+    /// The rename form, when that is the form on screen.
+    #[must_use]
+    pub fn rename_form(&self) -> Option<&Rename> {
+        match self.modal.as_ref() {
+            Some(Modal::Rename(rename)) => Some(rename),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn status(&self) -> &str {
         &self.status
@@ -393,6 +411,7 @@ impl App {
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
             Some(HostAction::FocusShell) => self.focus_shell(),
             Some(HostAction::DeleteSession) => self.open_delete(),
+            Some(HostAction::RenameSession) => self.open_rename(),
             // Half a panel, the step a pager uses.
             Some(HostAction::ScrollUp) => self.scroll_focus(i32::from(self.rows / 2)),
             Some(HostAction::ScrollDown) => self.scroll_focus(-i32::from(self.rows / 2)),
@@ -416,6 +435,10 @@ impl App {
             }
             Some(Modal::ConfirmDelete(confirm)) => {
                 confirm.typed.push_str(text);
+                return Ok(());
+            }
+            Some(Modal::Rename(rename)) => {
+                rename.name.push_str(text);
                 return Ok(());
             }
             None => {}
@@ -543,6 +566,39 @@ impl App {
         }));
     }
 
+    /// Opens the rename form, pre-filled with the current name. A paused session
+    /// renames as readily as a running one, because only the record changes.
+    fn open_rename(&mut self) {
+        let Some(index) = self.focused_entry() else {
+            self.status = "the shell has no name".into();
+            return;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        self.status.clear();
+        self.modal = Some(Modal::Rename(Rename {
+            index,
+            name: entry.record.name.clone(),
+        }));
+    }
+
+    /// Renames a session. The slug, the branch, and every worktree path stay as they
+    /// were, so nothing on disk moves.
+    pub fn rename_session(&mut self, index: usize, name: &str, deps: &Deps<'_>) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status = "a session needs a name".into();
+            return Ok(());
+        }
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Ok(());
+        };
+        entry.record.name = name.to_string();
+        self.status = format!("renamed to {name}");
+        self.save(deps)
+    }
+
     /// Removes the session and its transcript. Worktrees and branches are left alone.
     pub fn delete_session(&mut self, index: usize, deps: &Deps<'_>) -> Result<()> {
         let Some(entry) = self.entries.get(index) else {
@@ -582,6 +638,22 @@ impl App {
                             self.modal = None;
                             self.delete_session(confirm.index, deps)?;
                         }
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            Some(Modal::Rename(rename)) => {
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Backspace => {
+                        rename.name.pop();
+                    }
+                    KeyCode::Char(c) => rename.name.push(c),
+                    KeyCode::Enter => {
+                        let rename = rename.clone();
+                        self.modal = None;
+                        self.rename_session(rename.index, &rename.name, deps)?;
                     }
                     _ => {}
                 }
