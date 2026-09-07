@@ -158,6 +158,9 @@ pub struct App {
     modal: Option<Modal>,
     status: String,
     hooks_installed: bool,
+    /// True when the host terminal reports the keyboard enhancement. The bar shows
+    /// which mode is live, because the two paths encode a modified key differently.
+    keyboard_enhanced: bool,
     nerd_mode: bool,
     fps: f64,
     rows: u16,
@@ -197,6 +200,7 @@ impl App {
             modal: None,
             status: String::new(),
             hooks_installed: true,
+            keyboard_enhanced: false,
             nerd_mode: false,
             fps: 0.0,
             rows: 24,
@@ -333,7 +337,7 @@ impl App {
         self.shell_rss
     }
 
-    /// Moves the focus to the shell. Position 0 never swaps and never pauses.
+    /// Moves the focus to the shell. Position 0 never pauses and never closes.
     pub fn focus_shell(&mut self) {
         self.shell_focused = true;
         self.selection = None;
@@ -450,6 +454,15 @@ impl App {
     #[must_use]
     pub fn hooks_installed(&self) -> bool {
         self.hooks_installed
+    }
+
+    pub fn set_keyboard_enhanced(&mut self, enhanced: bool) {
+        self.keyboard_enhanced = enhanced;
+    }
+
+    #[must_use]
+    pub fn keyboard_enhanced(&self) -> bool {
+        self.keyboard_enhanced
     }
 
     #[must_use]

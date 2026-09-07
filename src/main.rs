@@ -74,7 +74,14 @@ fn open(project: Project, store: &FsStore) -> Result<()> {
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = run(&mut terminal, project, store, installed, hook_rx.as_ref());
+    let result = run(
+        &mut terminal,
+        project,
+        store,
+        installed,
+        kitty_keys,
+        hook_rx.as_ref(),
+    );
 
     disable_raw_mode()?;
     if kitty_keys {
@@ -96,6 +103,7 @@ fn run(
     project: Project,
     store: &FsStore,
     hooks_installed: bool,
+    keyboard_enhanced: bool,
     hook_rx: Option<&std::sync::mpsc::Receiver<hooks::HookEvent>>,
 ) -> Result<()> {
     let spawner = SystemPtySpawner;
@@ -122,6 +130,7 @@ fn run(
 
     let mut app = App::open(project, &deps, rows, cols);
     app.set_hooks_installed(hooks_installed);
+    app.set_keyboard_enhanced(keyboard_enhanced);
 
     let mut hit = ui::HitBox::default();
     let mut last_draw = Instant::now();

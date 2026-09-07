@@ -325,19 +325,44 @@ const HELP_HINT: &str = " press Alt+Shift+H for shortcuts ";
 /// The bottom bar. The pointer to the help sits hard against the left edge, and
 /// whatever last happened sits hard against the right edge.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let hint_width = u16::try_from(HELP_HINT.chars().count()).unwrap_or(0);
-    let columns =
-        Layout::horizontal([Constraint::Length(hint_width), Constraint::Min(0)]).split(area);
+    let mode = if app.keyboard_enhanced() {
+        KEYS_ENHANCED
+    } else {
+        KEYS_LEGACY
+    };
+    // The keyboard mode is the least urgent thing on the bar, so on a narrow terminal
+    // it is what yields, rather than the command the warning names.
+    let reserved = if app.hooks_installed() {
+        0
+    } else {
+        WARN_SHORT.chars().count() + 1
+    };
+    let mode =
+        if HELP_HINT.chars().count() + mode.chars().count() + reserved <= usize::from(area.width) {
+            mode
+        } else {
+            ""
+        };
+    let left = HELP_HINT.chars().count() + mode.chars().count();
+    let columns = Layout::horizontal([
+        Constraint::Length(u16::try_from(left).unwrap_or(0)),
+        Constraint::Min(0),
+    ])
+    .split(area);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            HELP_HINT,
-            Style::default().fg(Color::Black).bg(Color::DarkGray),
-        ))),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                HELP_HINT,
+                Style::default().fg(Color::Black).bg(Color::DarkGray),
+            ),
+            Span::styled(mode, Style::default().fg(Color::DarkGray)),
+        ])),
         columns[0],
     );
 
-    // One column is kept back, so the text never touches the last column.
-    let width = usize::from(columns[1].width).saturating_sub(1);
+    // One column is kept back at each end, so the text touches neither the keyboard
+    // mode on its left nor the right edge of the screen.
+    let width = usize::from(columns[1].width).saturating_sub(2);
     // The warning names a command the user has to run, so it keeps its room and the
     // transient message gives way. Right aligned text loses its tail when it
     // overflows, and the tail is the command.
@@ -373,6 +398,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         columns[1],
     );
 }
+
+/// Which keyboard path the host terminal gave culm. Both are supported, so neither
+/// reads as a fault.
+const KEYS_ENHANCED: &str = "  enhanced keys";
+const KEYS_LEGACY: &str = "  legacy keys";
 
 /// What the bar says when the hooks are missing. The short form is used when the
 /// long one does not fit, because a clipped command helps nobody.
@@ -793,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_is_only_the_hint_while_nothing_has_happened() {
+    fn the_bar_holds_the_hint_and_the_keyboard_mode_while_nothing_has_happened() {
         use crate::app::App;
         use crate::project::Project;
         let app = App::new(Project::new("spm", "/home/x/spm"));
@@ -808,7 +838,47 @@ mod tests {
             .filter_map(|x| buffer.cell(Position { x, y: 7 }))
             .map(|c| c.symbol().to_string())
             .collect();
-        assert_eq!(bar.trim_end(), HELP_HINT.trim_end());
+        assert_eq!(
+            bar.trim_end(),
+            format!("{HELP_HINT}{KEYS_LEGACY}").trim_end()
+        );
+    }
+
+    #[test]
+    fn the_bar_names_the_keyboard_mode_the_host_gave_culm() {
+        use crate::app::App;
+        use crate::project::Project;
+        for (enhanced, expected) in [(true, KEYS_ENHANCED), (false, KEYS_LEGACY)] {
+            let mut app = App::new(Project::new("spm", "/home/x/spm"));
+            app.set_keyboard_enhanced(enhanced);
+            let mut terminal =
+                Terminal::new(TestBackend::new(90, 8)).expect("the test backend starts");
+            terminal
+                .draw(|f| {
+                    draw(f, &app);
+                })
+                .expect("the frame draws");
+            let buffer = terminal.backend().buffer();
+            let bar: String = (0..90)
+                .filter_map(|x| buffer.cell(Position { x, y: 7 }))
+                .map(|c| c.symbol().to_string())
+                .collect();
+            assert!(
+                bar.contains(expected.trim()),
+                "enhanced={enhanced} gave {bar:?}"
+            );
+        }
+    }
+
+    /// The mode is informational. The warning names a command, so it outranks it.
+    #[test]
+    fn the_keyboard_mode_yields_to_the_hook_warning_on_a_narrow_bar() {
+        let bar = status_bar(46, false);
+        assert!(bar.contains(WARN_SHORT), "the warning survives: {bar:?}");
+        assert!(
+            !bar.contains(KEYS_ENHANCED.trim()) && !bar.contains(KEYS_LEGACY.trim()),
+            "the mode gave way: {bar:?}"
+        );
     }
 
     /// The warning names a command, so a narrow terminal must drop the transient
