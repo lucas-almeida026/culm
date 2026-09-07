@@ -6,7 +6,7 @@ A grove of bamboo sends many culms up from one shared rhizome. Each stem stands 
 
 ## Status
 
-Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 208 cases through the fakes.
+Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 211 cases through the fakes.
 
 Not built yet: archive, session reordering, and the TOML configuration file.
 
@@ -23,6 +23,7 @@ culm project alter name <name>     # rename it, so culm open <name> works
 culm project new <path> --import-native-sessions
                                    # register it and pull in the sessions it holds
 culm project repo add <path>       # add a git repository to it
+culm project repo list             # show the repositories it holds
 culm project import                # pull in sessions that appeared since
 culm                               # open the project that owns this directory
 culm open --import-native-sessions # import, then open

@@ -83,7 +83,7 @@ pub enum ProjectCmd {
     /// Change a property of a project.
     #[command(subcommand)]
     Alter(AlterCmd),
-    /// Add or remove a repository of a project.
+    /// List, add, or remove a repository of a project.
     #[command(subcommand)]
     Repo(RepoCmd),
 }
@@ -111,6 +111,11 @@ pub enum RepoCmd {
     /// Remove a repository from a project. The repository itself is not deleted.
     Rm {
         name: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List the repositories of a project.
+    List {
         #[arg(long)]
         project: Option<String>,
     },
@@ -192,6 +197,9 @@ pub fn run(
         }
         Some(Command::Project(ProjectCmd::Repo(RepoCmd::Rm { name, project }))) => {
             repo_rm(store, &name, project.as_deref(), cwd)
+        }
+        Some(Command::Project(ProjectCmd::Repo(RepoCmd::List { project }))) => {
+            repo_list(store, project.as_deref(), cwd)
         }
     }
 }
@@ -513,6 +521,22 @@ fn repo_rm(store: &dyn Store, name: &str, slug: Option<&str>, cwd: &Path) -> Res
     }
     store.save_project(&project)?;
     println!("{} no longer holds {name}", project.slug);
+    Ok(Outcome::Done)
+}
+
+/// Lists the repositories of a project, and where each one is checked out.
+fn repo_list(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Outcome> {
+    let project = resolve(store, slug, cwd)?;
+    if project.repos.is_empty() {
+        println!(
+            "{} holds no repository. run: culm project repo add <path>",
+            project.slug
+        );
+        return Ok(Outcome::Done);
+    }
+    for repo in &project.repos {
+        println!("{:<20} {}", repo.name, repo.path.display());
+    }
     Ok(Outcome::Done)
 }
 

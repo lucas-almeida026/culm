@@ -2296,3 +2296,50 @@ fn altering_a_name_to_the_one_it_already_has_is_not_a_failure() {
 
     assert!(f.store.project("spm").is_some(), "the state is still there");
 }
+
+#[test]
+fn repo_list_names_every_repository_of_the_project_at_the_working_directory() {
+    let f = Fakes::new();
+    let mut registry = culm::project::Registry::default();
+    registry.add(ROOT);
+    f.store.save_registry(&registry).expect("registry saves");
+    f.store.put_project(&project());
+
+    cli(&f, &["culm", "project", "repo", "list"]).expect("the list runs");
+
+    let listed = f.store.project("spm").expect("the project is there");
+    assert_eq!(
+        listed
+            .repos
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["api-mate", "crm-mate"],
+        "listing reads the repositories and changes none of them"
+    );
+    assert_eq!(f.store.saves(), 0, "a list writes nothing");
+}
+
+#[test]
+fn repo_list_reaches_another_project_by_name() {
+    let f = Fakes::new();
+    registered(&f, "other", "/home/x/other");
+
+    cli(
+        &f,
+        &["culm", "project", "repo", "list", "--project", "other"],
+    )
+    .expect("the list runs");
+}
+
+#[test]
+fn repo_list_refuses_a_directory_that_belongs_to_no_project() {
+    let f = Fakes::new();
+
+    let result = cli(&f, &["culm", "project", "repo", "list"]);
+
+    assert!(
+        result.is_err(),
+        "there is no project to list repositories of"
+    );
+}
