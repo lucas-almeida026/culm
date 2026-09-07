@@ -4,15 +4,49 @@ Many Claude Code sessions in one project, as vertical tabs. One visible at a tim
 
 A grove of bamboo sends many culms up from one shared rhizome. Each stem stands on its own, and all of them are fed by the same root system.
 
-## Status
+## Why it exists
 
-Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 226 cases through the fakes.
+The author works on several features per week and uses one Claude Code session per feature. Those sessions live across seven repositories that belong to one project. Three problems drove this:
 
-Not built yet: the TOML configuration file.
+**Sessions are hard to reach.**
 
-See [session-manager-spec.md](session-manager-spec.md) for the requirements, [FINDINGS.md](FINDINGS.md) for the spike that settled the stack, and [CLAUDE.md](CLAUDE.md) for the vision and the working rules.
+**A terminal multiplexer is the wrong shape.** tmux keeps sessions alive, but it manages windows, not projects. It knows nothing about which session needs attention, which repository a session belongs to, or how to resume a transcript.
 
-## Use
+**Existing tools bind a session to one repository.** [claude-squad](https://github.com/smtg-ai/claude-squad) requires a git repository at the working directory and gives each session a worktree. A project that spans seven repositories does not fit that model, and neither does a session that edits two repositories at once.
+
+culm treats the project as the unit. A project is any directory. Repositories join a project, including repositories outside the project directory. A session reaches every repository in its project.
+
+## How it works
+
+**One process, no daemon.** Every session is a real child process on its own pseudoterminal, opened with `portable-pty`. culm owns every one of them. Nothing survives the interface exiting, and nothing else supervises them.
+
+**Every session is drained, visible or not.** Each session runs a thread that reads its pseudoterminal and feeds a `vt100` parser holding two thousand lines of scrollback. This is not an optimization: an undrained pseudoterminal fills its buffer and the child blocks, which looks exactly like a hung background session. Drawing a frame copies the focused session's screen into a ratatui buffer, so switching tabs is a change of which screen gets copied and costs nothing.
+
+**The loop reads input first.** A keystroke never waits behind a frame. Hook messages come next, then a once-a-second pass that samples memory and reaps a child that ended, then a redraw capped at one per eight milliseconds so a session printing at full speed cannot drive the render.
+
+**Transcripts stay where Claude Code puts them.** culm generates a UUID and passes `--session-id` the first time a session starts, then `--resume <uuid>` every time after, which reloads the whole conversation. The transcript itself lives at `~/.claude/projects/<cwd with every / and . turned into ->/<uuid>.jsonl`, written by the CLI. culm reads those files to import a session and deletes one when you delete its session, and never moves or rewrites them.
+
+**Pausing is a signal, not a save.** A pause sends SIGTERM to the child and keeps the session id. Resuming spawns a fresh `claude --resume` against the same id, so the conversation comes back and the memory does not stay held.
+
+**Attention markers arrive over a socket.** `culm hooks install` adds entries to `~/.claude/settings.json` that point nine hook events back at the culm binary. Each session culm starts carries `CULM_SOCKET` in its environment; when a hook fires, the short-lived `culm hook` process posts one JSON payload to that Unix socket and the interface marks the matching session. A `claude` you start yourself has no `CULM_SOCKET`, so its hooks exit quietly. culm never reads a session's terminal output to decide anything.
+
+One gap is worth knowing: no hook reports that you answered a permission prompt, so `🔐` would otherwise stay up for the whole time the approved tool runs. The keystroke that answers the prompt is the only signal culm gets, so that keystroke clears the marker. Merely looking at a session never clears one.
+
+**Worktrees are the only version control work.** A session that edits a repository gets `git worktree add -b <session-slug>` under `<project root>/.worktrees/<repo>-<session>`, so two sessions editing one repository do not collide. culm creates worktrees and removes them. It never commits, never pushes, and never deletes a branch.
+
+**State is two JSON files.** A global `registry.json` lists every project, and `projects/<slug>.json` holds one project's root, repositories, and session records, both under `$XDG_STATE_HOME/culm` (or `~/.local/state/culm`). A record is a session id, a name, its repositories, and when it was last used — never the conversation, which is the transcript's job. Every write goes to a temporary file and is renamed into place, so an interrupted write cannot truncate saved state.
+
+**The shell at position 0 is the same machinery.** It spawns `$SHELL` at the project root through the same pseudoterminal code, minus the session id, the marker, the worktree, and `CULM_SOCKET`. It is not saved, it does not count toward the nine-session limit, and it restarts on the next tick if you exit it.
+
+**Keys go through one translation table.** culm asks the terminal for the kitty keyboard protocol and uses it when the answer is yes, because it reports a modified key as a single unambiguous event. A terminal that says no runs the legacy path instead; the protocol is an enhancement and never a requirement. The bottom bar names which mode you got.
+
+**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 226 cases without starting a process, touching disk outside a temporary directory, or sleeping.
+
+## What it is
+
+One Rust binary, for Linux. Early, and in use daily. The TOML configuration file is the one planned piece not built yet.
+
+Register a project and open it:
 
 ```
 culm hooks install                 # once, so attention markers work
@@ -40,14 +74,6 @@ The paused list is ordered by last use, newest first. `Alt+Shift+F` puts the cur
 
 Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session.
 
-Shift+Enter inserts a newline in a Claude Code prompt rather than submitting it. kitty does not report that key to an application on its own, so it needs one line in `kitty.conf`:
-
-```
-map shift+enter send_text all \x1b\r
-```
-
-Alt+Enter does the same thing and needs no configuration. [FINDINGS.md](FINDINGS.md) records why.
-
 The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
 
 ## Build
@@ -58,6 +84,8 @@ cargo test
 ```
 
 Linux only. Other systems may work, and no test covers them.
+
+The requirements live in [session-manager-spec.md](session-manager-spec.md), and the working rules live in [CLAUDE.md](CLAUDE.md).
 
 ## Contribution
 
