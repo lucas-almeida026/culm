@@ -1061,6 +1061,7 @@ fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
         culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force"]),
         &f.store,
         &f.git,
+        &culm::testing::FakeNamer::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -1113,6 +1114,7 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force", "--recursive"]),
         &f.store,
         &f.git,
+        &culm::testing::FakeNamer::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -1140,6 +1142,7 @@ fn rm_refuses_an_unknown_project() {
         culm::cli::Cli::parse_from(["culm", "project", "rm", "absent", "--force"]),
         &f.store,
         &f.git,
+        &culm::testing::FakeNamer::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     );

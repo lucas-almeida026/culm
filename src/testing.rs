@@ -10,6 +10,11 @@ use anyhow::{Result, anyhow};
 
 use crate::pty::{Child, Pty, PtySpawner, SessionSpec, Spawned};
 
+/// A transcript in `MemoryStore`, addressed by its directory and its id.
+type TranscriptKey = (String, String);
+/// Its modification time and its text.
+type TranscriptValue = (u64, String);
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -278,6 +283,8 @@ pub struct MemoryStore {
     saves: Arc<std::sync::atomic::AtomicUsize>,
     removed_transcripts: Arc<Mutex<Vec<(std::path::PathBuf, String)>>>,
     claude_dirs: Arc<Mutex<Vec<String>>>,
+    /// Transcript text by directory and id, and the time each file carries.
+    transcripts: Arc<Mutex<std::collections::HashMap<TranscriptKey, TranscriptValue>>>,
 }
 
 impl Default for MemoryStore {
@@ -289,6 +296,7 @@ impl Default for MemoryStore {
             saves: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             removed_transcripts: Arc::new(Mutex::new(Vec::new())),
             claude_dirs: Arc::new(Mutex::new(Vec::new())),
+            transcripts: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -325,6 +333,19 @@ impl MemoryStore {
         S: Into<String>,
     {
         *lock(&self.claude_dirs) = dirs.into_iter().map(Into::into).collect();
+    }
+
+    /// Seeds one transcript, and the directory that holds it.
+    pub fn put_transcript(&self, dir: &str, id: &str, modified_secs: u64, text: &str) {
+        let mut dirs = lock(&self.claude_dirs);
+        if !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_string());
+        }
+        drop(dirs);
+        lock(&self.transcripts).insert(
+            (dir.to_string(), id.to_string()),
+            (modified_secs, text.to_string()),
+        );
     }
 
     /// Every transcript culm asked to delete, as the working directory and the id.
@@ -379,7 +400,70 @@ impl crate::store::Store for MemoryStore {
 
     fn remove_claude_dir(&self, name: &str) -> Result<()> {
         lock(&self.claude_dirs).retain(|d| d != name);
+        lock(&self.transcripts).retain(|(dir, _), _| dir != name);
         Ok(())
+    }
+
+    fn list_transcripts(&self, dir: &str) -> Result<Vec<crate::store::TranscriptFile>> {
+        Ok(lock(&self.transcripts)
+            .iter()
+            .filter(|((d, _), _)| d == dir)
+            .map(
+                |((_, id), (modified_secs, _))| crate::store::TranscriptFile {
+                    id: id.clone(),
+                    modified_secs: *modified_secs,
+                },
+            )
+            .collect())
+    }
+
+    fn read_transcript(&self, dir: &str, id: &str) -> Result<String> {
+        lock(&self.transcripts)
+            .get(&(dir.to_string(), id.to_string()))
+            .map(|(_, text)| text.clone())
+            .ok_or_else(|| anyhow!("no transcript {id} under {dir}"))
+    }
+}
+
+/// Answers with a canned name, keyed by something the prompt contains, and records
+/// every prompt it was asked about.
+#[derive(Debug, Default, Clone)]
+pub struct FakeNamer {
+    answers: Arc<Mutex<Vec<(String, String)>>>,
+    asked: Arc<Mutex<Vec<String>>>,
+    fail: Arc<AtomicBool>,
+}
+
+impl FakeNamer {
+    /// Answers `name` for any prompt holding `needle`. The first match wins.
+    pub fn answer(&self, needle: &str, name: &str) {
+        lock(&self.answers).push((needle.to_string(), name.to_string()));
+    }
+
+    /// Every prompt culm asked about, in order.
+    #[must_use]
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.asked).clone()
+    }
+
+    /// Makes every later request fail, as an absent `claude` binary does.
+    pub fn fail_from_now_on(&self) {
+        self.fail.store(true, Ordering::Relaxed);
+    }
+}
+
+impl crate::namer::Namer for FakeNamer {
+    fn name_for(&self, first_prompt: &str) -> Result<String> {
+        lock(&self.asked).push(first_prompt.to_string());
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(anyhow!("fake namer refused"));
+        }
+        for (needle, name) in lock(&self.answers).iter() {
+            if first_prompt.contains(needle.as_str()) {
+                return Ok(name.clone());
+            }
+        }
+        Ok("a named session".to_string())
     }
 }
 

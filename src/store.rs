@@ -8,6 +8,17 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::project::{Project, Registry, transcript_dir_name};
+use crate::transcript::is_session_file;
+
+/// One transcript file under `~/.claude/projects/<dir>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptFile {
+    /// The Claude Code session id, which is the file name without its extension.
+    pub id: String,
+    /// Modification time, in seconds since the unix epoch. An import uses it as the
+    /// time the session was last active.
+    pub modified_secs: u64,
+}
 
 /// The state culm keeps between runs, and the Claude Code settings it edits.
 pub trait Store: fmt::Debug {
@@ -24,6 +35,10 @@ pub trait Store: fmt::Debug {
     fn remove_project(&self, slug: &str) -> Result<()>;
     /// The directory names under `~/.claude/projects`.
     fn list_claude_dirs(&self) -> Result<Vec<String>>;
+    /// The session files of one directory under `~/.claude/projects`.
+    fn list_transcripts(&self, dir: &str) -> Result<Vec<TranscriptFile>>;
+    /// The whole text of one transcript.
+    fn read_transcript(&self, dir: &str, id: &str) -> Result<String>;
     /// Removes one whole directory under `~/.claude/projects`.
     fn remove_claude_dir(&self, name: &str) -> Result<()>;
 }
@@ -161,6 +176,43 @@ impl Store for FsStore {
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect())
+    }
+
+    fn list_transcripts(&self, dir: &str) -> Result<Vec<TranscriptFile>> {
+        let path = self.claude_projects.join(dir);
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let mut files = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_session_file(&name) {
+                continue;
+            }
+            // A file whose time cannot be read still imports. It sorts last, which is
+            // where a session of unknown age belongs.
+            let modified_secs = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            files.push(TranscriptFile {
+                id: name.trim_end_matches(".jsonl").to_string(),
+                modified_secs,
+            });
+        }
+        Ok(files)
+    }
+
+    fn read_transcript(&self, dir: &str, id: &str) -> Result<String> {
+        let path = self.claude_projects.join(dir).join(format!("{id}.jsonl"));
+        // A transcript can hold bytes that are not valid text, and a name is worth
+        // more than a strict read, so the invalid bytes are replaced.
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn remove_claude_dir(&self, name: &str) -> Result<()> {

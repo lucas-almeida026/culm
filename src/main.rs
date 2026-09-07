@@ -11,6 +11,7 @@ use culm::app::{App, Deps, SIDEBAR_DEFAULT};
 use culm::cli::{Cli, Outcome};
 use culm::clock::SystemClock;
 use culm::git::SystemGit;
+use culm::namer::ClaudeNamer;
 use culm::project::Project;
 use culm::pty::SystemPtySpawner;
 use culm::stats::ProcMemoryProbe;
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("culm"));
     let cwd = std::env::current_dir()?;
 
-    match cli::run(parsed, &store, &SystemGit, &exe, &cwd)? {
+    match cli::run(parsed, &store, &SystemGit, &ClaudeNamer, &exe, &cwd)? {
         Outcome::Done => Ok(()),
         Outcome::Open(project) => open(*project, &store),
     }

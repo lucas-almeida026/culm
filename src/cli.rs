@@ -8,8 +8,13 @@ use clap::{Parser, Subcommand};
 
 use crate::git::Git;
 use crate::hooks;
-use crate::project::{Project, ProjectEntry, Registry, Removal, Repository, plan_removal, slugify};
+use crate::namer::Namer;
+use crate::project::{
+    Project, ProjectEntry, Registry, Removal, Repository, SessionRecord, SessionState,
+    dir_belongs_to, plan_removal, slugify, transcript_dir_name, unique_slug,
+};
 use crate::store::Store;
+use crate::transcript;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -28,6 +33,9 @@ pub enum Command {
     Open {
         /// Project slug. Defaults to the project that owns the working directory.
         project: Option<String>,
+        /// Import every Claude Code session found under the root before opening.
+        #[arg(long)]
+        import_native_sessions: bool,
     },
     /// Register projects and their repositories.
     #[command(subcommand)]
@@ -46,9 +54,17 @@ pub enum ProjectCmd {
     New {
         /// Any directory. A git repository at the root is not required.
         path: PathBuf,
+        /// Import every Claude Code session found under the root.
+        #[arg(long)]
+        import_native_sessions: bool,
     },
     /// List every registered project.
     List,
+    /// Import every Claude Code session found under the root, as paused sessions.
+    Import {
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Remove a project. Never deletes a branch, a source file, or a repository.
     Rm {
         project: String,
@@ -99,10 +115,26 @@ pub enum Outcome {
 }
 
 /// Runs one command. Printing happens here, because a command line is output.
-pub fn run(cli: Cli, store: &dyn Store, git: &dyn Git, exe: &Path, cwd: &Path) -> Result<Outcome> {
+pub fn run(
+    cli: Cli,
+    store: &dyn Store,
+    git: &dyn Git,
+    namer: &dyn Namer,
+    exe: &Path,
+    cwd: &Path,
+) -> Result<Outcome> {
     match cli.command {
-        None => open(store, None, cwd),
-        Some(Command::Open { project }) => open(store, project.as_deref(), cwd),
+        None => open(store, namer, None, cwd, false),
+        Some(Command::Open {
+            project,
+            import_native_sessions,
+        }) => open(
+            store,
+            namer,
+            project.as_deref(),
+            cwd,
+            import_native_sessions,
+        ),
         Some(Command::Hook) => {
             hooks::send_from_stdin();
             Ok(Outcome::Done)
@@ -119,8 +151,14 @@ pub fn run(cli: Cli, store: &dyn Store, git: &dyn Git, exe: &Path, cwd: &Path) -
             println!("hooks removed");
             Ok(Outcome::Done)
         }
-        Some(Command::Project(ProjectCmd::New { path })) => project_new(store, &path),
+        Some(Command::Project(ProjectCmd::New {
+            path,
+            import_native_sessions,
+        })) => project_new(store, namer, &path, import_native_sessions),
         Some(Command::Project(ProjectCmd::List)) => project_list(store),
+        Some(Command::Project(ProjectCmd::Import { project })) => {
+            project_import_cmd(store, namer, project.as_deref(), cwd)
+        }
         Some(Command::Project(ProjectCmd::Rm {
             project,
             force,
@@ -135,7 +173,7 @@ pub fn run(cli: Cli, store: &dyn Store, git: &dyn Git, exe: &Path, cwd: &Path) -
     }
 }
 
-fn project_new(store: &dyn Store, path: &Path) -> Result<Outcome> {
+fn project_new(store: &dyn Store, namer: &dyn Namer, path: &Path, import: bool) -> Result<Outcome> {
     let root = std::fs::canonicalize(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
@@ -150,9 +188,139 @@ fn project_new(store: &dyn Store, path: &Path) -> Result<Outcome> {
     }
     let entry = registry.add(&root);
     store.save_registry(&registry)?;
-    store.save_project(&Project::new(&entry.slug, &root))?;
+    let mut project = Project::new(&entry.slug, &root);
+    store.save_project(&project)?;
     println!("project {} at {}", entry.slug, root.display());
+    if import {
+        report(&import_sessions(store, namer, &mut project)?);
+    }
     Ok(Outcome::Done)
+}
+
+fn project_import_cmd(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    slug: Option<&str>,
+    cwd: &Path,
+) -> Result<Outcome> {
+    let mut project = resolve(store, slug, cwd)?;
+    report(&import_sessions(store, namer, &mut project)?);
+    Ok(Outcome::Done)
+}
+
+/// What one import did. Printing is the caller's job, so the decision stays testable.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ImportReport {
+    pub imported: usize,
+    /// How many names came from the namer rather than from the transcript.
+    pub named: usize,
+    /// One line per transcript that was left alone, and why.
+    pub skipped: Vec<String>,
+}
+
+fn report(report: &ImportReport) {
+    println!(
+        "imported {} sessions ({} named by haiku, {} skipped)",
+        report.imported,
+        report.named,
+        report.skipped.len()
+    );
+    for line in &report.skipped {
+        println!("  skipped {line}");
+    }
+}
+
+/// The name a transcript falls back to when nothing describes it.
+fn fallback_name(id: &str) -> String {
+    format!("session-{}", id.chars().take(8).collect::<String>())
+}
+
+/// Pulls every Claude Code transcript under the root into the project as a paused
+/// session.
+///
+/// The session id is kept, so `--resume` reaches the same conversation. A transcript
+/// whose id the project already holds is left alone, which makes a second import add
+/// only what appeared since the first.
+pub fn import_sessions(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    project: &mut Project,
+) -> Result<ImportReport> {
+    let mut report = ImportReport::default();
+    let root_dir = transcript_dir_name(&project.root);
+    let mut known: Vec<String> = project.sessions.iter().map(|s| s.id.clone()).collect();
+    let mut taken: Vec<String> = project.sessions.iter().map(|s| s.slug.clone()).collect();
+
+    let mut dirs = store.list_claude_dirs()?;
+    dirs.sort();
+    for dir in dirs {
+        if !dir_belongs_to(&project.root, &dir, true) {
+            continue;
+        }
+        let mut files = store.list_transcripts(&dir)?;
+        // Newest first, so a name collision numbers the older session rather than the
+        // one the user just left.
+        files.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs).then(a.id.cmp(&b.id)));
+        for file in files {
+            if known.contains(&file.id) {
+                continue;
+            }
+            let head = transcript::scan(&file.id, &store.read_transcript(&dir, &file.id)?);
+            if head.custom_title.is_none() && head.first_prompt.is_none() {
+                report
+                    .skipped
+                    .push(format!("{}: nothing to name it by", file.id));
+                continue;
+            }
+            // `--resume` reads the transcript from the directory it was written in, so
+            // a session with no recorded working directory cannot be resumed.
+            let cwd = match head.cwd.clone() {
+                Some(cwd) => cwd,
+                None if dir == root_dir => project.root.clone(),
+                None => {
+                    report
+                        .skipped
+                        .push(format!("{}: no working directory recorded", file.id));
+                    continue;
+                }
+            };
+            let base = match head.custom_title.as_deref() {
+                Some(title) => slugify(title),
+                None => match head.first_prompt.as_deref() {
+                    Some(prompt) => match namer.name_for(prompt) {
+                        Ok(name) => {
+                            report.named += 1;
+                            slugify(&name)
+                        }
+                        Err(e) => {
+                            report
+                                .skipped
+                                .push(format!("{}: named from its id, because {e}", file.id));
+                            fallback_name(&file.id)
+                        }
+                    },
+                    None => fallback_name(&file.id),
+                },
+            };
+            let slug = unique_slug(&base, &taken.iter().map(String::as_str).collect::<Vec<_>>());
+            taken.push(slug.clone());
+            known.push(file.id.clone());
+            project.sessions.push(SessionRecord {
+                id: file.id.clone(),
+                name: slug.clone(),
+                slug,
+                state: SessionState::Paused,
+                cwd,
+                repos: Vec::new(),
+                // The transcript exists, so the session has run and resumes.
+                started: true,
+                last_active: file.modified_secs,
+            });
+            report.imported += 1;
+        }
+    }
+    store.save_project(project)?;
+    Ok(report)
 }
 
 fn project_list(store: &dyn Store) -> Result<Outcome> {
@@ -268,8 +436,18 @@ fn repo_rm(store: &dyn Store, name: &str, slug: Option<&str>, cwd: &Path) -> Res
     Ok(Outcome::Done)
 }
 
-fn open(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Outcome> {
-    Ok(Outcome::Open(Box::new(resolve(store, slug, cwd)?)))
+fn open(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    slug: Option<&str>,
+    cwd: &Path,
+    import: bool,
+) -> Result<Outcome> {
+    let mut project = resolve(store, slug, cwd)?;
+    if import {
+        report(&import_sessions(store, namer, &mut project)?);
+    }
+    Ok(Outcome::Open(Box::new(project)))
 }
 
 /// Finds the project by slug, or the project that owns the working directory.

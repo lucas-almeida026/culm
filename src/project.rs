@@ -191,6 +191,17 @@ pub fn transcript_dir_name(cwd: &Path) -> String {
         .collect()
 }
 
+/// True when a directory under `~/.claude/projects` belongs to this project.
+///
+/// The directory is the encoded working directory. A match is the root itself, or,
+/// when `recursive`, any path under it. The separator is required, so `/home/x/spm2`
+/// never matches `/home/x/spm`.
+#[must_use]
+pub fn dir_belongs_to(root: &Path, dir_name: &str, recursive: bool) -> bool {
+    let encoded = transcript_dir_name(root);
+    dir_name == encoded || (recursive && dir_name.starts_with(&format!("{encoded}-")))
+}
+
 /// Everything one `culm project rm` removes outside its own state file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Removal {
@@ -207,11 +218,9 @@ pub struct Removal {
 /// separator is required, so `/home/x/spm2` never matches `/home/x/spm`.
 #[must_use]
 pub fn plan_removal(project: &Project, claude_dirs: &[String], recursive: bool) -> Removal {
-    let root = transcript_dir_name(&project.root);
-    let under_root = format!("{root}-");
     let claude_dirs = claude_dirs
         .iter()
-        .filter(|name| *name == &root || (recursive && name.starts_with(&under_root)))
+        .filter(|name| dir_belongs_to(&project.root, name, recursive))
         .cloned()
         .collect();
 
@@ -397,6 +406,16 @@ mod tests {
         project.repos.clear();
         let plan = plan_removal(&project, &[], true);
         assert!(plan.worktrees.is_empty());
+    }
+
+    #[test]
+    fn a_directory_belongs_to_the_root_only_across_a_separator() {
+        let root = Path::new("/home/x/spm");
+        assert!(dir_belongs_to(root, "-home-x-spm", false));
+        assert!(!dir_belongs_to(root, "-home-x-spm-api-mate", false));
+        assert!(dir_belongs_to(root, "-home-x-spm-api-mate", true));
+        assert!(!dir_belongs_to(root, "-home-x-spm2", true));
+        assert!(!dir_belongs_to(root, "-home-x-other", true));
     }
 
     #[test]
