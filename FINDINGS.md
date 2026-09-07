@@ -111,9 +111,22 @@ wheel has to reach the child instead. `vt100` also keeps no scrollback while a s
 region is active (`grid.rs`, the push into `scrollback` is guarded by
 `!scroll_region_active()`).
 
+## Reading a transcript
+
+Checked on 2026-09-06 against the files under `~/.claude/projects`, at the CLI version
+recorded above.
+
+- A rename inside Claude Code appends `{"type":"custom-title","customTitle":"...","sessionId":"..."}`. The last such line wins, so a scan reads the whole file.
+- The first `{"type":"user"}` line is often not a prompt. It carries `isMeta` for a caveat block, or a `<command-name>` block for a slash command, or a `<local-command-stdout>` block for the output of one. Naming a session from the first user line without skipping those produces a name for the caveat rather than for the work.
+- Every user line carries `cwd`, and `message.content` is either a string or a list of blocks that may hold images beside text.
+- A transcript directory also holds a `memory` directory, so only a `<uuid>.jsonl` file is a session.
+- The `spm` directory held 126 MB across its transcripts, with one file of 18 MB. An import therefore reads each file once, and the interface never reads one.
+
 ## Not verified
 
 - The kitty keyboard protocol path.
 - Images in a panel.
 - Scrollback and the wheel under a real terminal driven by hand, rather than by a script.
 - Any terminal other than kitty, and any platform other than Linux.
+- Selection, OSC 52 copy, and middle-click paste under a real terminal. OSC 52 inside tmux needs `set -g set-clipboard on`. kitty allows a clipboard write by default.
+- `ClaudeNamer`, which starts a real `claude` child. Every test drives `FakeNamer` instead.

@@ -6,9 +6,9 @@ A grove of bamboo sends many culms up from one shared rhizome. Each stem stands 
 
 ## Status
 
-Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, and restores the active sessions on the next open. `cargo test` covers 100 cases through the fakes.
+Early. culm runs many sessions in one project, creates a git worktree per session per repository, marks a session that needs attention, holds a plain shell at position 0, imports the Claude Code sessions a directory already holds, and restores the active sessions on the next open. `cargo test` covers 184 cases through the fakes.
 
-Not built yet: rename, archive, session reordering, and the TOML configuration file.
+Not built yet: archive, session reordering, and the TOML configuration file.
 
 See [session-manager-spec.md](session-manager-spec.md) for the requirements, [FINDINGS.md](FINDINGS.md) for the spike that settled the stack, and [CLAUDE.md](CLAUDE.md) for the vision and the working rules.
 
@@ -17,12 +17,22 @@ See [session-manager-spec.md](session-manager-spec.md) for the requirements, [FI
 ```
 culm hooks install                 # once, so attention markers work
 culm project new <path>            # register a directory
+culm project new <path> --import-native-sessions
+                                   # register it and pull in the sessions it holds
 culm project repo add <path>       # add a git repository to it
+culm project import                # pull in sessions that appeared since
 culm                               # open the project that owns this directory
-culm project rm <project>          # unregister it; never deletes source or branches
+culm open --import-native-sessions # import, then open
+culm project rm <project>          # unregister it, never deletes source or branches
 ```
 
-Inside the interface: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+X` deletes a paused one, `Alt+Shift+D` toggles nerd mode, `Ctrl+q` quits. A click focuses any row, and the separator drags to resize the sidebar.
+An import keeps the session id of each transcript, so resuming one reaches the same conversation. It takes the name from the title the session carries inside Claude Code. A session that was never named there is named by a headless `claude -p --model haiku` child reading the first prompt. Every imported session arrives paused.
+
+Inside the interface: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+R` renames it, `Alt+Shift+F` searches the paused list, `Alt+Shift+X` deletes a paused one, `Alt+Shift+D` toggles nerd mode, `Ctrl+q` quits. A click focuses any row, and the separator drags to resize the sidebar.
+
+The paused list is ordered by last use, newest first. `Alt+Shift+F` puts the cursor in the search box above it, which filters by name on every keystroke. `Enter` lands on the first match, and `Esc` clears the filter.
+
+Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session.
 
 The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
 

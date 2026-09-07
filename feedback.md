@@ -1,3 +1,6 @@
-- the green check emoji that should show up once the model finishes the task is show by a split second and then is removed right after (seems to be related to the lock emoji change you did recently because before that it was working fine, that is, it is a regression)
-- I can't scroll the claude code session, I want to be able to
-- the question mark as show for the first time to be, as far as I know that indicates the AskUserQuestion tool was invoked, but there was no UI for me with the question and the options that usually show up in normal claude code sessions
+- I expect to be able to rename any session — active or inactive — via leader+shift+r (right now leader is not configurable so it will be Alt), which should open a popup where I type the new name and it applies immediately.
+- I expect click-and-drag with the mouse to work for copy and paste when interecting with the embeded claude session, the way it does in a native terminal — select by dragging, paste with the usual shortcut/middle-click, no extra ceremony.
+- I expect starting a project with --import-native-sessions in a directory that already has Claude Code sessions to pull all of them into the project as inactive sessions — each one keeping its original UUID, taking a slugified version of its existing name when one is available, and otherwise getting a generated name from a headless Claude Code child process running Haiku against the first message of its transcript.
+- I expect the list of inactive sessions to be orther by last_interacted_with desc and to be able to search by typing on a text box that refresh the list on every key stroke showing all the sessions that have a name matching my search term
+
+note: considere this feat/v2 (new branch from main); but do not alter the crate version number
