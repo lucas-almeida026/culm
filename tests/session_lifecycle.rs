@@ -636,6 +636,7 @@ fn a_click_on_a_sidebar_row_switches_the_visible_session() {
         separator_col: 29,
         rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 2, &hit);
@@ -652,6 +653,7 @@ fn dragging_the_separator_resizes_the_sidebar_within_its_limits() {
         separator_col: 29,
         rows: Vec::new(),
         panel: Rect::new(30, 0, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
     };
     let _ = &f;
 
@@ -688,6 +690,7 @@ fn a_click_inside_the_panel_never_changes_the_focus() {
         separator_col: 29,
         rows: vec![(2, Focus::Entry(0)), (3, Focus::Entry(1))],
         panel: Rect::new(30, 0, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 60, 2, &hit);
@@ -913,6 +916,7 @@ fn a_click_on_the_shell_row_focuses_the_shell() {
         separator_col: 29,
         rows: vec![(1, Focus::Shell), (4, Focus::Entry(0))],
         panel: Rect::new(30, 0, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
     };
 
     app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 4, &hit);
@@ -1156,6 +1160,7 @@ fn panel_hit() -> HitBox {
         separator_col: 29,
         rows: Vec::new(),
         panel: Rect::new(30, 0, 50, 10),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 10)),
     }
 }
 
@@ -1510,4 +1515,180 @@ fn the_shell_has_no_name_to_rename() {
 
     assert!(app.rename_form().is_none());
     assert_eq!(app.status(), "the shell has no name");
+}
+
+/// A session whose screen already holds `settled`, so a drag reads known text.
+fn text_session(f: &Fakes, settled: &str) -> App {
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("session starts");
+    let session = app.entries()[0].live.as_ref().expect("live");
+    assert!(session.wait_for_text(settled, Duration::from_secs(1)));
+    app
+}
+
+/// The panel of `panel_hit` starts at column 30, and its border takes one cell, so
+/// cell (row, col) sits at this screen position.
+fn at(row: u16, col: u16) -> (u16, u16) {
+    (31 + col, 1 + row)
+}
+
+fn drag(app: &mut App, hit: &HitBox, from: (u16, u16), to: (u16, u16)) {
+    app.on_mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1, hit);
+    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1, hit);
+    app.on_mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1, hit);
+}
+
+#[test]
+fn a_drag_over_the_panel_copies_the_text_under_it() {
+    let f = Fakes::with_output(b"hello world\r\nsecond line\r\n");
+    let mut app = text_session(&f, "second line");
+    let hit = panel_hit();
+
+    drag(&mut app, &hit, at(0, 0), at(0, 4));
+
+    assert_eq!(app.clipboard(), "hello");
+    assert_eq!(app.take_copy().as_deref(), Some("hello"));
+    assert_eq!(app.take_copy(), None, "the copy is handed over once");
+    assert_eq!(app.status(), "copied 5 chars");
+}
+
+#[test]
+fn a_drag_across_rows_copies_both_rows() {
+    let f = Fakes::with_output(b"hello world\r\nsecond line\r\n");
+    let mut app = text_session(&f, "second line");
+    let hit = panel_hit();
+
+    drag(&mut app, &hit, at(0, 6), at(1, 5));
+
+    assert_eq!(app.clipboard(), "world\nsecond");
+}
+
+#[test]
+fn a_drag_backwards_copies_the_same_text() {
+    let f = Fakes::with_output(b"hello world\r\nsecond line\r\n");
+    let mut app = text_session(&f, "second line");
+    let hit = panel_hit();
+
+    drag(&mut app, &hit, at(0, 4), at(0, 0));
+
+    assert_eq!(app.clipboard(), "hello");
+}
+
+#[test]
+fn a_click_without_a_drag_selects_nothing() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+
+    drag(&mut app, &hit, at(0, 3), at(0, 3));
+
+    assert!(app.selection().is_none());
+    assert_eq!(app.take_copy(), None);
+    assert_eq!(app.clipboard(), "");
+}
+
+#[test]
+fn a_middle_click_pastes_the_last_copy_as_one_bracketed_block() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Middle),
+        at(2, 2).0,
+        at(2, 2).1,
+        &hit,
+    );
+
+    assert_eq!(pty.written_utf8(), "\x1b[200~hello\x1b[201~");
+}
+
+#[test]
+fn a_middle_click_with_nothing_copied_sends_nothing() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Middle),
+        at(0, 0).0,
+        at(0, 0).1,
+        &hit,
+    );
+
+    assert_eq!(pty.written_utf8(), "");
+}
+
+#[test]
+fn a_keystroke_clears_the_selection() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+    drag(&mut app, &hit, at(0, 0), at(0, 4));
+    assert!(app.selection().is_some());
+
+    app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is handled");
+
+    assert!(app.selection().is_none());
+    assert_eq!(
+        app.clipboard(),
+        "hello",
+        "the copy survives, so a later middle click still pastes it"
+    );
+}
+
+#[test]
+fn the_wheel_clears_the_selection_because_the_view_moved() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &hit, at(0, 0), at(0, 4));
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit);
+
+    assert!(app.selection().is_none());
+}
+
+#[test]
+fn a_drag_over_the_sidebar_never_copies() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+
+    drag(&mut app, &hit, (5, 2), (5, 6));
+
+    assert!(app.selection().is_none());
+    assert_eq!(app.take_copy(), None);
+}
+
+#[test]
+fn no_selection_starts_while_a_form_is_open() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+    app.on_key(&key(KeyCode::Char('N'), KeyModifiers::ALT), &f.deps())
+        .expect("the form opens");
+
+    drag(&mut app, &hit, at(0, 0), at(0, 4));
+
+    assert!(app.selection().is_none());
+    assert_eq!(app.take_copy(), None);
+}
+
+#[test]
+fn a_selection_over_the_shell_copies_from_the_shell() {
+    let f = Fakes::with_output(b"a shell prompt\r\n");
+    let mut app = App::open(project(), &f.deps(), 20, 50);
+    let hit = panel_hit();
+    let shell = app.shell().expect("the shell runs");
+    assert!(shell.wait_for_text("a shell prompt", Duration::from_secs(1)));
+
+    drag(&mut app, &hit, at(0, 0), at(0, 6));
+
+    assert_eq!(app.clipboard(), "a shell");
 }

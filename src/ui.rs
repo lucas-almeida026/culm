@@ -3,7 +3,7 @@
 //! vertical tabs. Sessions that are not visible are still parsed, never drawn.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
@@ -22,6 +22,8 @@ pub struct HitBox {
     /// Screen row of each sidebar row, and what it focuses.
     pub rows: Vec<(u16, Focus)>,
     pub panel: Rect,
+    /// The panel without its border. A selection is measured from this corner.
+    pub inner: Rect,
 }
 
 impl Default for HitBox {
@@ -31,6 +33,7 @@ impl Default for HitBox {
             separator_col: crate::app::SIDEBAR_DEFAULT - 1,
             rows: Vec::new(),
             panel: Rect::new(0, 0, 0, 0),
+            inner: Rect::new(0, 0, 0, 0),
         }
     }
 }
@@ -54,6 +57,9 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
 
     let rows = draw_sidebar(f, app, sidebar);
     draw_panel(f, app, panel);
+    if let Some((start, end)) = app.selection() {
+        highlight(f, inner_of(panel), start, end);
+    }
     draw_status(f, app, status_bar);
     if app.nerd_mode() {
         draw_fps(f, app, panel);
@@ -70,6 +76,18 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         separator_col: sidebar.x + sidebar.width.saturating_sub(1),
         rows,
         panel,
+        inner: inner_of(panel),
+    }
+}
+
+/// The panel without its border, which is where the child's cells sit.
+#[must_use]
+pub fn inner_of(panel: Rect) -> Rect {
+    Rect {
+        x: panel.x.saturating_add(1),
+        y: panel.y.saturating_add(1),
+        width: panel.width.saturating_sub(2),
+        height: panel.height.saturating_sub(2),
     }
 }
 
@@ -432,6 +450,32 @@ fn draw_confirm(f: &mut Frame, confirm: &ConfirmDelete, panel: Rect) {
         Paragraph::new(lines).block(Block::bordered().title(" delete session ")),
         area,
     );
+}
+
+/// Marks the selected cells by reversing them, over whatever the child drew.
+///
+/// The style is applied to the finished buffer rather than to the child's screen,
+/// because the child owns its own colors and must not learn about the selection.
+fn highlight(f: &mut Frame, inner: Rect, start: (u16, u16), end: (u16, u16)) {
+    let buffer = f.buffer_mut();
+    let last_row = end.0.min(inner.height.saturating_sub(1));
+    for row in start.0..=last_row {
+        let first_col = if row == start.0 { start.1 } else { 0 };
+        let last_col = if row == end.0 {
+            end.1
+        } else {
+            inner.width.saturating_sub(1)
+        };
+        for col in first_col..=last_col.min(inner.width.saturating_sub(1)) {
+            let at = Position {
+                x: inner.x + col,
+                y: inner.y + row,
+            };
+            if let Some(cell) = buffer.cell_mut(at) {
+                cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
 }
 
 /// The rename form. Only the displayed name changes, so the hint says so and no

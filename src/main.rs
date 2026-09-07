@@ -1,6 +1,7 @@
 //! Binary entry point. Wires the real implementations and runs the loop.
 //! Keep this file thin. Logic belongs in the library, where tests can reach it.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use culm::project::Project;
 use culm::pty::SystemPtySpawner;
 use culm::stats::ProcMemoryProbe;
 use culm::store::{FsStore, Store};
-use culm::{cli, hooks, ui};
+use culm::{cli, clipboard, hooks, ui};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -133,7 +134,17 @@ fn run(
             match event::read()? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(&k, &deps)?,
                 Event::Paste(text) => app.on_paste(&text)?,
-                Event::Mouse(m) => app.on_mouse(m.kind, m.column, m.row, &hit),
+                Event::Mouse(m) => {
+                    app.on_mouse(m.kind, m.column, m.row, &hit);
+                    // Only the loop owns the output stream, so the copy is written
+                    // here. One escape, and no cursor movement, so the drawn buffer
+                    // stays valid.
+                    if let Some(text) = app.take_copy() {
+                        let backend = terminal.backend_mut();
+                        backend.write_all(&clipboard::osc52(&text))?;
+                        backend.flush()?;
+                    }
+                }
                 _ => {}
             }
         }

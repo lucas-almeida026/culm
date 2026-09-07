@@ -190,6 +190,23 @@ impl Session {
         }
     }
 
+    /// The text of a linear selection over the visible screen, both ends included.
+    ///
+    /// Each end is `(row, column)`, counted inside the panel border. The view honors
+    /// the scrollback offset, so a selection made over a held-back panel reads what
+    /// the user sees.
+    #[must_use]
+    pub fn text_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        let parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        // vt100 counts the end column as exclusive, so the last cell needs one more.
+        parser
+            .screen()
+            .contents_between(start.0, start.1, end.0, end.1.saturating_add(1))
+    }
+
     /// The visible screen as plain text. Tests read this instead of a terminal.
     #[must_use]
     pub fn screen_text(&self) -> String {

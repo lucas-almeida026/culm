@@ -115,6 +115,14 @@ pub struct Rename {
     pub name: String,
 }
 
+/// A drag over the panel. Both ends are `(row, column)`, counted inside the panel
+/// border, so a resize of the sidebar never moves a selection that is already made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+}
+
 /// The form on top of the panel, if any.
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -150,6 +158,12 @@ pub struct App {
     /// True when a record changed but the change has not reached the store. The tick
     /// writes it, so typing never costs a file write.
     dirty: bool,
+    selection: Option<Selection>,
+    /// The last copy. A middle click pastes it, and it survives a focus change so a
+    /// copy in one session pastes into another.
+    clipboard: String,
+    /// Text the event loop has yet to hand to the terminal through OSC 52.
+    copied: Option<String>,
 }
 
 impl App {
@@ -174,6 +188,9 @@ impl App {
             cols: 80,
             now: 0,
             dirty: false,
+            selection: None,
+            clipboard: String::new(),
+            copied: None,
         }
     }
 
@@ -302,6 +319,7 @@ impl App {
     /// Moves the focus to the shell. Position 0 never swaps and never pauses.
     pub fn focus_shell(&mut self) {
         self.shell_focused = true;
+        self.selection = None;
     }
 
     #[must_use]
@@ -335,6 +353,29 @@ impl App {
             Some(Modal::ConfirmDelete(confirm)) => Some(confirm),
             _ => None,
         }
+    }
+
+    /// The selection, ordered so that the first end comes first on screen.
+    #[must_use]
+    pub fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let s = self.selection?;
+        Some(if s.anchor <= s.head {
+            (s.anchor, s.head)
+        } else {
+            (s.head, s.anchor)
+        })
+    }
+
+    /// Takes the text waiting to reach the terminal's clipboard. The event loop calls
+    /// this after every mouse event, because only the loop owns the output stream.
+    pub fn take_copy(&mut self) -> Option<String> {
+        self.copied.take()
+    }
+
+    /// The last copy, which a middle click pastes.
+    #[must_use]
+    pub fn clipboard(&self) -> &str {
+        &self.clipboard
     }
 
     /// The rename form, when that is the form on screen.
@@ -380,6 +421,7 @@ impl App {
         if index < self.entries.len() {
             self.entry_focus = index;
             self.shell_focused = false;
+            self.selection = None;
         }
     }
 
@@ -453,6 +495,8 @@ impl App {
     /// answers it is the only signal culm receives. A focus change sends no bytes and
     /// therefore still clears nothing.
     fn send_to_focus(&mut self, bytes: &[u8]) -> Result<()> {
+        // Typing replaces what the selection was for, as it does in a terminal.
+        self.selection = None;
         if self.shell_focused {
             if let Some(shell) = self.shell.as_mut() {
                 // A terminal snaps back to the live output when the user types.
@@ -503,6 +547,9 @@ impl App {
         if self.modal.is_some() {
             return;
         }
+        // The view moves under the cells the selection names, so it no longer marks
+        // the text the user chose.
+        self.selection = None;
         let Some(session) = self.focused_session_mut() else {
             return;
         };
@@ -527,6 +574,7 @@ impl App {
         if self.modal.is_some() {
             return;
         }
+        self.selection = None;
         if let Some(session) = self.focused_session() {
             session.scroll_by(lines);
         }
@@ -538,6 +586,7 @@ impl App {
             return;
         }
         self.status.clear();
+        self.selection = None;
         self.modal = Some(Modal::NewSession(NewSession {
             name: String::new(),
             chosen: vec![false; self.project.repos.len()],
@@ -559,6 +608,7 @@ impl App {
             return;
         }
         self.status.clear();
+        self.selection = None;
         self.modal = Some(Modal::ConfirmDelete(ConfirmDelete {
             index,
             name: entry.record.name.clone(),
@@ -577,6 +627,7 @@ impl App {
             return;
         };
         self.status.clear();
+        self.selection = None;
         self.modal = Some(Modal::Rename(Rename {
             index,
             name: entry.record.name.clone(),
@@ -927,6 +978,7 @@ impl App {
         row: u16,
         hit: &crate::ui::HitBox,
     ) {
+        let at = Position { x: column, y: row };
         match kind {
             MouseEventKind::Down(MouseButton::Left) if column == hit.separator_col => {
                 self.dragging = true;
@@ -938,18 +990,75 @@ impl App {
                     None => {}
                 }
             }
+            MouseEventKind::Down(MouseButton::Left)
+                if self.modal.is_none() && hit.inner.contains(at) =>
+            {
+                let cell = cell_of(at, hit.inner);
+                self.selection = Some(Selection {
+                    anchor: cell,
+                    head: cell,
+                });
+            }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
                 self.sidebar_width = column.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
             }
-            MouseEventKind::Up(MouseButton::Left) => self.dragging = false,
-            MouseEventKind::ScrollUp if hit.panel.contains(Position { x: column, y: row }) => {
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.head = cell_of(at, hit.inner);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging = false;
+                self.finish_selection();
+            }
+            MouseEventKind::Down(MouseButton::Middle)
+                if self.modal.is_none() && hit.inner.contains(at) =>
+            {
+                let text = self.clipboard.clone();
+                if !text.is_empty() {
+                    // A middle click pastes exactly as a terminal paste does, so the
+                    // child receives one bracketed block rather than many keystrokes.
+                    let _ = self.on_paste(&text);
+                }
+            }
+            MouseEventKind::ScrollUp if hit.panel.contains(at) => {
                 self.wheel(true, column, row, hit.panel);
             }
-            MouseEventKind::ScrollDown if hit.panel.contains(Position { x: column, y: row }) => {
+            MouseEventKind::ScrollDown if hit.panel.contains(at) => {
                 self.wheel(false, column, row, hit.panel);
             }
             _ => {}
         }
+    }
+
+    /// Reads the text under the selection when the button comes up.
+    ///
+    /// A press and a release on one cell is a click, not a drag, and it selects
+    /// nothing. The highlight stays after a real drag, as it does in a terminal,
+    /// until the next click or the next keystroke.
+    fn finish_selection(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        if selection.anchor == selection.head {
+            self.selection = None;
+            return;
+        }
+        let Some((start, end)) = self.selection() else {
+            return;
+        };
+        let Some(session) = self.focused_session() else {
+            self.selection = None;
+            return;
+        };
+        let text = session.text_between(start, end);
+        if text.is_empty() {
+            self.selection = None;
+            return;
+        }
+        self.status = format!("copied {} chars", text.chars().count());
+        self.clipboard = text.clone();
+        self.copied = Some(text);
     }
 
     /// Resizes every running session to the panel. Sessions that are not visible are
@@ -1006,4 +1115,14 @@ impl App {
         self.project.sessions = self.entries.iter().map(|e| e.record.clone()).collect();
         deps.store.save_project(&self.project)
     }
+}
+
+/// A screen position as a cell inside the panel, clamped to the panel.
+fn cell_of(at: Position, inner: Rect) -> (u16, u16) {
+    let last_row = inner.height.saturating_sub(1);
+    let last_col = inner.width.saturating_sub(1);
+    (
+        at.y.saturating_sub(inner.y).min(last_row),
+        at.x.saturating_sub(inner.x).min(last_col),
+    )
 }
