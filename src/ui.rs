@@ -410,7 +410,7 @@ const WARN_LONG: &str = "markers off, run: culm hooks install";
 const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
-const SHORTCUTS: [(&str, &str); 14] = [
+const SHORTCUTS: [(&str, &str); 15] = [
     ("Alt+0", "focus the shell at position 0"),
     ("Alt+1 to Alt+9", "focus an active session"),
     ("Alt+Shift+N", "create a session"),
@@ -424,6 +424,7 @@ const SHORTCUTS: [(&str, &str); 14] = [
     ("Shift+PageUp/Down", "scroll half a panel"),
     ("wheel", "scroll, or reach a mouse-aware child"),
     ("drag", "select, and copy on release"),
+    ("alt click", "extend the selection to here"),
     ("middle click", "paste the last copy"),
 ];
 
@@ -644,15 +645,24 @@ fn button(label: &str, focused: bool, color: Color) -> Span<'static> {
 ///
 /// The style is applied to the finished buffer rather than to the child's screen,
 /// because the child owns its own colors and must not learn about the selection.
-fn highlight(f: &mut Frame, inner: Rect, start: (u16, u16), end: (u16, u16)) {
+fn highlight(f: &mut Frame, inner: Rect, start: (i32, u16), end: (i32, u16)) {
+    let height = i32::from(inner.height);
+    // Scrolling carries a selection off the panel, at which point it marks nothing.
+    if end.0 < 0 || start.0 >= height {
+        return;
+    }
     let buffer = f.buffer_mut();
-    let last_row = end.0.min(inner.height.saturating_sub(1));
-    for row in start.0..=last_row {
+    for row in start.0.max(0)..=end.0.min(height - 1) {
+        // A row the panel cut off starts at the left edge, because the selection
+        // runs on from the part above the first row.
         let first_col = if row == start.0 { start.1 } else { 0 };
         let last_col = if row == end.0 {
             end.1
         } else {
             inner.width.saturating_sub(1)
+        };
+        let Ok(row) = u16::try_from(row) else {
+            continue;
         };
         for col in first_col..=last_col.min(inner.width.saturating_sub(1)) {
             let at = Position {
@@ -720,6 +730,46 @@ mod tests {
     fn a_long_name_is_truncated_with_an_ellipsis() {
         assert_eq!(truncate("feature-branch", 6), "featu…");
         assert_eq!(truncate("short", 10), "short");
+    }
+
+    /// Which rows of the panel a selection reverses. Scrolling carries a selection
+    /// past either edge, so the renderer has to clip it rather than address a row
+    /// the panel does not hold.
+    fn marked_rows(start: (i32, u16), end: (i32, u16)) -> Vec<u16> {
+        let inner = Rect::new(0, 0, 8, 4);
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("the backend starts");
+        terminal
+            .draw(|f| highlight(f, inner, start, end))
+            .expect("the highlight draws");
+        let buffer = terminal.backend().buffer();
+        (0..inner.height)
+            .filter(|y| {
+                buffer
+                    .cell(Position { x: 0, y: *y })
+                    .is_some_and(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_selection_inside_the_panel_marks_its_own_rows() {
+        assert_eq!(marked_rows((1, 0), (2, 7)), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_selection_carried_above_the_panel_marks_only_what_is_left() {
+        assert_eq!(marked_rows((-2, 0), (1, 7)), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_selection_carried_below_the_panel_marks_only_what_is_left() {
+        assert_eq!(marked_rows((2, 0), (9, 7)), vec![2, 3]);
+    }
+
+    #[test]
+    fn a_selection_carried_off_the_panel_marks_nothing() {
+        assert_eq!(marked_rows((-9, 0), (-4, 7)), Vec::<u16>::new());
+        assert_eq!(marked_rows((7, 0), (9, 7)), Vec::<u16>::new());
     }
 
     /// The button rectangles are computed from the layout by hand, so this renders the

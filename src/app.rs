@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
+use ratatui::crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use crate::clock::Clock;
@@ -27,6 +27,14 @@ pub const SIDEBAR_DEFAULT: u16 = 30;
 
 /// Lines one notch of the wheel moves the view.
 const WHEEL_LINES: i32 = 3;
+
+/// Passes a forwarded wheel notch waits for the child to repaint. The loop runs
+/// far faster than a child draws, so this is a fraction of a second.
+const SCROLL_SETTLE_TRIES: u32 = 40;
+
+/// The share of a panel's written rows that must line up for a repaint to count as
+/// a scroll rather than as a fresh screen.
+const SCROLL_MATCH_SHARE: usize = 4;
 
 /// How long a pause waits for a child to leave before it stops asking.
 const TERMINATE_GRACE: Duration = Duration::from_secs(3);
@@ -126,10 +134,26 @@ pub struct Rename {
 
 /// A drag over the panel. Both ends are `(row, column)`, counted inside the panel
 /// border, so a resize of the sidebar never moves a selection that is already made.
+///
+/// The row is signed because culm carries a selection when it scrolls the panel, and
+/// text the user marked then scrolled past sits above the first row or below the last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    pub anchor: (u16, u16),
-    pub head: (u16, u16),
+    pub anchor: (i32, u16),
+    pub head: (i32, u16),
+}
+
+/// A wheel notch culm handed to a child, waiting to be measured.
+///
+/// The child repaints when it pleases, so the distance its text moved is not known
+/// at the moment the notch goes out. The rows as they were are kept until the panel
+/// changes, and the two are then lined up against each other.
+#[derive(Debug, Clone)]
+struct PendingScroll {
+    before: Vec<u64>,
+    /// Passes spent waiting. A child that ignores the wheel must not hold a
+    /// selection for ever.
+    tries: u32,
 }
 
 /// The form on top of the panel, if any.
@@ -173,6 +197,8 @@ pub struct App {
     /// writes it, so typing never costs a file write.
     dirty: bool,
     selection: Option<Selection>,
+    /// A forwarded wheel notch that has not been measured yet.
+    pending_scroll: Option<PendingScroll>,
     /// The last copy. A middle click pastes it, and it survives a focus change so a
     /// copy in one session pastes into another.
     clipboard: String,
@@ -208,6 +234,7 @@ impl App {
             now: 0,
             dirty: false,
             selection: None,
+            pending_scroll: None,
             clipboard: String::new(),
             copied: None,
             filter: String::new(),
@@ -378,7 +405,7 @@ impl App {
 
     /// The selection, ordered so that the first end comes first on screen.
     #[must_use]
-    pub fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
+    pub fn selection(&self) -> Option<((i32, u16), (i32, u16))> {
         let s = self.selection?;
         Some(if s.anchor <= s.head {
             (s.anchor, s.head)
@@ -622,13 +649,10 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        // The view moves under the cells the selection names, so it no longer marks
-        // the text the user chose.
-        self.selection = None;
         let Some(session) = self.focused_session_mut() else {
             return;
         };
-        match session.mouse_encoding() {
+        let (moved, forwarded) = match session.mouse_encoding() {
             Some(encoding) => {
                 // The panel border sits outside the child, and a terminal counts from
                 // one, so the border column and row become the origin.
@@ -639,8 +663,55 @@ impl App {
                     encoding,
                 );
                 let _ = session.send(&bytes);
+                // The child moves its own text, and not now but whenever it repaints.
+                // Keep the rows as they are so the move can be measured later.
+                (0, Some(session.row_fingerprint()))
             }
-            None => session.scroll_by(if up { WHEEL_LINES } else { -WHEEL_LINES }),
+            None => (
+                session.scroll_by(if up { WHEEL_LINES } else { -WHEEL_LINES }),
+                None,
+            ),
+        };
+        self.carry_selection(moved);
+        if let Some(before) = forwarded
+            && self.selection.is_some()
+            && self.pending_scroll.is_none()
+        {
+            // Several notches in a row measure as one move, so the oldest rows stay.
+            self.pending_scroll = Some(PendingScroll { before, tries: 0 });
+        }
+    }
+
+    /// Measures how far a child moved its own text after culm handed it a wheel notch,
+    /// and carries the selection by that distance.
+    ///
+    /// The event loop calls this every pass. It costs nothing until a notch has gone
+    /// out to a child that paints its own scrolling, and it is the only way a
+    /// selection keeps marking its text on such a panel.
+    pub fn settle_scroll(&mut self) {
+        let Some(mut pending) = self.pending_scroll.take() else {
+            return;
+        };
+        if self.selection.is_none() {
+            return;
+        }
+        let Some(now) = self.focused_session().map(Session::row_fingerprint) else {
+            return;
+        };
+        pending.tries = pending.tries.saturating_add(1);
+        if now == pending.before {
+            // Nothing has arrived yet. A child that ignores the notch would otherwise
+            // hold the selection for ever, so the wait ends.
+            if pending.tries < SCROLL_SETTLE_TRIES {
+                self.pending_scroll = Some(pending);
+            }
+            return;
+        }
+        match row_shift(&pending.before, &now) {
+            Some(lines) => self.carry_selection(lines),
+            // The panel changed in a way that is not a scroll, so the marks no longer
+            // name the text the user chose.
+            None => self.selection = None,
         }
     }
 
@@ -649,9 +720,25 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        self.selection = None;
-        if let Some(session) = self.focused_session() {
-            session.scroll_by(lines);
+        let Some(session) = self.focused_session() else {
+            return;
+        };
+        let moved = session.scroll_by(lines);
+        self.carry_selection(moved);
+    }
+
+    /// Moves a selection with the text it marks, so scrolling never drops it.
+    ///
+    /// A selection names panel rows, and the text under them moves down the panel by
+    /// exactly the distance the view went back. Rows that leave the panel are kept
+    /// rather than clamped, so scrolling the other way brings the same text back.
+    fn carry_selection(&mut self, lines: i32) {
+        if lines == 0 {
+            return;
+        }
+        if let Some(selection) = self.selection.as_mut() {
+            selection.anchor.0 = selection.anchor.0.saturating_add(lines);
+            selection.head.0 = selection.head.0.saturating_add(lines);
         }
     }
 
@@ -1086,12 +1173,28 @@ impl App {
         self.save(deps)
     }
 
-    /// Maps a click or a drag onto the sidebar.
+    /// Maps a click or a drag onto the sidebar, with no modifier held.
     pub fn on_mouse(
         &mut self,
         kind: MouseEventKind,
         column: u16,
         row: u16,
+        hit: &crate::ui::HitBox,
+        deps: &Deps<'_>,
+    ) {
+        self.on_mouse_with(kind, column, row, KeyModifiers::NONE, hit, deps);
+    }
+
+    /// Maps a click or a drag onto the sidebar.
+    ///
+    /// `Shift` on a click extends the selection instead of starting a new one, which
+    /// is how a terminal grows a selection over text that arrived after the first drag.
+    pub fn on_mouse_with(
+        &mut self,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: KeyModifiers,
         hit: &crate::ui::HitBox,
         deps: &Deps<'_>,
     ) {
@@ -1128,10 +1231,28 @@ impl App {
                 if self.modal.is_none() && hit.inner.contains(at) =>
             {
                 let cell = cell_of(at, hit.inner);
-                self.selection = Some(Selection {
-                    anchor: cell,
-                    head: cell,
-                });
+                match self.selection.as_mut() {
+                    // A modifier keeps the anchor where it was, so the selection
+                    // reaches the new point rather than starting again.
+                    //
+                    // Alt is the gesture that works, because a terminal keeps
+                    // shift and the mouse for its own selection even while an
+                    // application holds the mouse. kitty maps `shift+left press`
+                    // to `mouse_selection` for a grabbed application, so that click
+                    // never arrives here. Shift is still accepted for a terminal
+                    // that does forward it.
+                    Some(selection)
+                        if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+                    {
+                        selection.head = cell;
+                    }
+                    _ => {
+                        self.selection = Some(Selection {
+                            anchor: cell,
+                            head: cell,
+                        });
+                    }
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
                 self.sidebar_width = column.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
@@ -1256,11 +1377,126 @@ impl App {
 }
 
 /// A screen position as a cell inside the panel, clamped to the panel.
-fn cell_of(at: Position, inner: Rect) -> (u16, u16) {
+fn cell_of(at: Position, inner: Rect) -> (i32, u16) {
     let last_row = inner.height.saturating_sub(1);
     let last_col = inner.width.saturating_sub(1);
     (
-        at.y.saturating_sub(inner.y).min(last_row),
+        i32::from(at.y.saturating_sub(inner.y).min(last_row)),
         at.x.saturating_sub(inner.x).min(last_col),
     )
+}
+
+/// How far a panel's text moved between two row fingerprints, positive downward.
+///
+/// A repaint counts as a scroll when enough written rows line up at one offset.
+/// Blank rows are ignored, because a panel holds many and they match anywhere.
+/// `None` means the panel was redrawn rather than scrolled.
+fn row_shift(before: &[u64], now: &[u64]) -> Option<i32> {
+    let written = before.iter().filter(|&&row| row != 0).count();
+    if written == 0 {
+        return None;
+    }
+    let height = i32::try_from(before.len()).unwrap_or(0);
+    let mut best: Option<(usize, i32)> = None;
+    for shift in -(height - 1)..height {
+        let score = aligned_rows(before, now, shift);
+        // The smallest move wins a tie, because a panel of repeated lines would
+        // otherwise pick an offset at random.
+        let better = match best {
+            None => true,
+            Some((top, at)) => score > top || (score == top && shift.abs() < at.abs()),
+        };
+        if better {
+            best = Some((score, shift));
+        }
+    }
+    let (score, shift) = best?;
+    if score < 2 || score.saturating_mul(SCROLL_MATCH_SHARE) < written {
+        return None;
+    }
+    Some(shift)
+}
+
+/// How many written rows of `before` sit `shift` rows further down in `now`.
+fn aligned_rows(before: &[u64], now: &[u64], shift: i32) -> usize {
+    before
+        .iter()
+        .enumerate()
+        .filter(|&(_, &row)| row != 0)
+        .filter(|&(at, &row)| {
+            let Ok(at) = i32::try_from(at) else {
+                return false;
+            };
+            usize::try_from(at + shift)
+                .ok()
+                .and_then(|to| now.get(to))
+                .is_some_and(|&found| found == row)
+        })
+        .count()
+}
+
+#[cfg(test)]
+mod tests {
+    // Test code may use `expect` with a message. Library code may not.
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    /// A panel of six rows, where each number stands for one line of text.
+    fn rows(values: [u64; 6]) -> Vec<u64> {
+        values.to_vec()
+    }
+
+    #[test]
+    fn a_panel_scrolled_down_by_two_measures_as_two() {
+        let before = rows([11, 12, 13, 14, 15, 16]);
+        let after = rows([9, 10, 11, 12, 13, 14]);
+        assert_eq!(row_shift(&before, &after), Some(2));
+    }
+
+    #[test]
+    fn a_panel_scrolled_the_other_way_measures_as_a_negative() {
+        let before = rows([11, 12, 13, 14, 15, 16]);
+        let after = rows([13, 14, 15, 16, 17, 18]);
+        assert_eq!(row_shift(&before, &after), Some(-2));
+    }
+
+    #[test]
+    fn a_panel_that_did_not_move_measures_as_zero() {
+        let before = rows([11, 12, 13, 14, 15, 16]);
+        let after = rows([11, 12, 13, 14, 99, 16]);
+        assert_eq!(
+            row_shift(&before, &after),
+            Some(0),
+            "one row was rewritten, and the rest stayed where they were"
+        );
+    }
+
+    #[test]
+    fn a_fresh_screen_measures_as_nothing() {
+        let before = rows([11, 12, 13, 14, 15, 16]);
+        let after = rows([21, 22, 23, 24, 25, 26]);
+        assert_eq!(row_shift(&before, &after), None);
+    }
+
+    #[test]
+    fn blank_rows_never_decide_the_distance() {
+        // Only two rows carry text. A blank row hashes to zero and must not line up
+        // with the blank rows of the panel after the move.
+        let before = rows([0, 0, 31, 32, 0, 0]);
+        let after = rows([0, 0, 0, 0, 31, 32]);
+        assert_eq!(row_shift(&before, &after), Some(2));
+    }
+
+    #[test]
+    fn an_empty_panel_measures_as_nothing() {
+        assert_eq!(row_shift(&rows([0; 6]), &rows([0; 6])), None);
+    }
+
+    #[test]
+    fn the_smallest_move_wins_when_a_panel_repeats_itself() {
+        let before = rows([7, 7, 7, 7, 7, 7]);
+        let after = rows([7, 7, 7, 7, 7, 7]);
+        assert_eq!(row_shift(&before, &after), Some(0));
+    }
 }

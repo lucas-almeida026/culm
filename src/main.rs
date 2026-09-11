@@ -145,7 +145,7 @@ fn run(
                 Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(&k, &deps)?,
                 Event::Paste(text) => app.on_paste(&text)?,
                 Event::Mouse(m) => {
-                    app.on_mouse(m.kind, m.column, m.row, &hit, &deps);
+                    app.on_mouse_with(m.kind, m.column, m.row, m.modifiers, &hit, &deps);
                     // Only the loop owns the output stream, so the copy is written
                     // here. One escape, and no cursor movement, so the drawn buffer
                     // stays valid.
@@ -158,6 +158,10 @@ fn run(
                 _ => {}
             }
         }
+
+        // A child that paints its own scrolling repaints after the notch reaches it,
+        // so the distance its text moved is measured here, on a later pass.
+        app.settle_scroll();
 
         if let Some(rx) = hook_rx {
             while let Ok(event) = rx.try_recv() {

@@ -1825,15 +1825,250 @@ fn a_keystroke_clears_the_selection() {
 }
 
 #[test]
-fn the_wheel_clears_the_selection_because_the_view_moved() {
+fn the_wheel_carries_the_selection_with_the_text_it_marks() {
     let f = Fakes::with_output(&numbered_lines());
     let mut app = text_session(&f, "line-199");
     let hit = panel_hit();
-    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+    assert_eq!(app.clipboard(), "line-177");
 
     app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
 
-    assert!(app.selection().is_none());
+    assert_eq!(
+        app.selection(),
+        Some(((3, 0), (3, 7))),
+        "one notch moved the text three rows down the panel, and the selection with it"
+    );
+}
+
+/// Writes bytes straight into a session's screen, standing in for the child. The
+/// fake spawner replays one fixed stream, so a repaint after the wheel arrives here.
+fn repaint(app: &App, bytes: &[u8]) {
+    let session = app.entries()[0].live.as_ref().expect("one is live");
+    let mut parser = session.parser().lock().expect("the parser is free");
+    parser.process(bytes);
+}
+
+/// Redraws a panel of numbered lines starting at `first`, which is what a child that
+/// owns its own scrolling does when it moves its conversation.
+fn redraw_from(app: &App, first: usize, rows: usize) {
+    let mut out = b"\x1b[2J\x1b[H".to_vec();
+    for n in first..first + rows {
+        // No newline after the last row, which would scroll the panel one further.
+        if n > first {
+            out.extend(b"\r\n");
+        }
+        out.extend(format!("line-{n:03}").into_bytes());
+    }
+    repaint(app, &out);
+}
+
+#[test]
+fn a_forwarded_wheel_carries_the_selection_by_what_the_child_moved() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+    assert_eq!(app.clipboard(), "line-177");
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    // The child answers the notch by repainting two lines further back.
+    redraw_from(&app, 175, 24);
+    app.settle_scroll();
+
+    assert_eq!(
+        app.selection(),
+        Some(((2, 0), (2, 7))),
+        "line-177 is now two rows further down, and the marks moved with it"
+    );
+}
+
+#[test]
+fn a_forwarded_wheel_drops_the_selection_when_the_child_drew_a_fresh_screen() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    repaint(
+        &app,
+        b"\x1b[2J\x1b[Hnothing here matches what was on the panel before\r\n",
+    );
+    app.settle_scroll();
+
+    assert!(
+        app.selection().is_none(),
+        "that was a new screen, not a scroll, so the marks name nothing"
+    );
+}
+
+#[test]
+fn a_child_that_ignores_the_wheel_gives_the_selection_back() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    // The panel never changes, so the wait runs out rather than lasting for ever.
+    for _ in 0..200 {
+        app.settle_scroll();
+    }
+    redraw_from(&app, 175, 24);
+    app.settle_scroll();
+
+    assert_eq!(
+        app.selection(),
+        Some(((0, 0), (0, 7))),
+        "the measurement gave up, so a later repaint never moves the marks"
+    );
+}
+
+#[test]
+fn a_wheel_the_child_handles_leaves_the_selection_where_it_is() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+
+    assert_eq!(
+        app.selection(),
+        Some(((0, 0), (0, 7))),
+        "the child repaints its own panel, so culm's view never moved"
+    );
+}
+
+#[test]
+fn shift_page_up_carries_the_selection_too() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+
+    app.on_key(&key(KeyCode::PageUp, KeyModifiers::SHIFT), &f.deps())
+        .expect("the panel scrolls");
+
+    assert_eq!(
+        app.selection(),
+        Some(((12, 0), (12, 7))),
+        "half of a twenty-four row panel"
+    );
+}
+
+#[test]
+fn alt_click_extends_the_selection_instead_of_starting_a_new_one() {
+    let f = Fakes::with_output(b"hello world\r\nsecond line\r\n");
+    let mut app = text_session(&f, "second line");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 4));
+    assert_eq!(app.clipboard(), "hello");
+    let d = f.deps();
+
+    app.on_mouse_with(
+        MouseEventKind::Down(MouseButton::Left),
+        at(1, 5).0,
+        at(1, 5).1,
+        KeyModifiers::ALT,
+        &hit,
+        &d,
+    );
+    app.on_mouse_with(
+        MouseEventKind::Up(MouseButton::Left),
+        at(1, 5).0,
+        at(1, 5).1,
+        KeyModifiers::ALT,
+        &hit,
+        &d,
+    );
+
+    assert_eq!(app.clipboard(), "hello world\nsecond");
+}
+
+#[test]
+fn alt_click_extends_a_selection_that_scrolling_carried() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = text_session(&f, "line-199");
+    let hit = panel_hit();
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 7));
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    let d = f.deps();
+
+    app.on_mouse_with(
+        MouseEventKind::Down(MouseButton::Left),
+        at(5, 7).0,
+        at(5, 7).1,
+        KeyModifiers::ALT,
+        &hit,
+        &d,
+    );
+    app.on_mouse_with(
+        MouseEventKind::Up(MouseButton::Left),
+        at(5, 7).0,
+        at(5, 7).1,
+        KeyModifiers::ALT,
+        &hit,
+        &d,
+    );
+
+    assert_eq!(
+        app.clipboard(),
+        "line-177\nline-178\nline-179",
+        "the anchor still marks the line it was put on before the scroll"
+    );
+}
+
+#[test]
+fn a_modifier_with_nothing_selected_starts_a_selection() {
+    let f = Fakes::with_output(b"hello world\r\n");
+    let mut app = text_session(&f, "hello world");
+    let hit = panel_hit();
+
+    app.on_mouse_with(
+        MouseEventKind::Down(MouseButton::Left),
+        at(0, 2).0,
+        at(0, 2).1,
+        KeyModifiers::ALT,
+        &hit,
+        &f.deps(),
+    );
+
+    assert_eq!(app.selection(), Some(((0, 2), (0, 2))));
+}
+
+#[test]
+fn text_carried_off_the_panel_is_read_back_out_of_the_scrollback() {
+    let f = Fakes::with_output(&numbered_lines());
+    let app = text_session(&f, "line-199");
+    let session = app.entries()[0].live.as_ref().expect("one is live");
+    assert_eq!(session.text_between((0, 0), (0, 7)), "line-177");
+
+    assert_eq!(session.scroll_by(24), 24, "a whole panel of scrollback");
+
+    assert_eq!(
+        session.text_between((24, 0), (24, 7)),
+        "line-177",
+        "the same line, now one whole panel below the view"
+    );
+    assert_eq!(
+        session.scrollback(),
+        24,
+        "the reader put the view back where it found it"
+    );
+}
+
+#[test]
+fn a_selection_taller_than_the_panel_reads_every_row_of_it() {
+    let f = Fakes::with_output(&numbered_lines());
+    let app = text_session(&f, "line-199");
+    let session = app.entries()[0].live.as_ref().expect("one is live");
+    session.scroll_by(24);
+
+    let text = session.text_between((24, 0), (26, 7));
+
+    assert_eq!(text, "line-177\nline-178\nline-179");
 }
 
 #[test]

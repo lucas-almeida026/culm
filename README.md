@@ -40,7 +40,7 @@ One gap is worth knowing: no hook reports that you answered a permission prompt,
 
 **Keys go through one translation table.** culm asks the terminal for the kitty keyboard protocol and uses it when the answer is yes, because it reports a modified key as a single unambiguous event. A terminal that says no runs the legacy path instead; the protocol is an enhancement and never a requirement. The bottom bar names which mode you got.
 
-**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 226 cases without starting a process, touching disk outside a temporary directory, or sleeping.
+**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 250 cases without starting a process, touching disk outside a temporary directory, or sleeping.
 
 ## What it is
 
@@ -72,7 +72,9 @@ Inside the interface, `Alt+Shift+H` shows the table of every binding. The bottom
 
 The paused list is ordered by last use, newest first. `Alt+Shift+F` puts the cursor in the search box above it, which filters by name on every keystroke. `Enter` lands on the first match, and `Esc` clears the filter.
 
-Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session.
+Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session. An alt click extends the selection to a new point, keeping the anchor, so a block longer than the panel is copied in two gestures. Alt rather than shift, because a terminal keeps shift and the mouse for its own selection even while an application holds the mouse.
+
+Scrolling keeps the selection on the text it marks. When culm owns the scrollback it knows exactly how far the view went. A session that scrolls itself, such as Claude Code, repaints its own panel instead and reports nothing, so culm hashes the rows before the notch and lines them up against the rows that arrive after, then moves the marks by that distance. A repaint that does not line up was a new screen rather than a scroll, and the selection is dropped. Such a session keeps its own history, so text that scrolls off its panel is gone as far as culm is concerned and cannot be copied back.
 
 The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
 
