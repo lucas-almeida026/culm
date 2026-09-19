@@ -77,6 +77,19 @@ pub struct SessionRecord {
     /// A record written before culm tracked this reads as zero and sorts last.
     #[serde(default)]
     pub last_active: u64,
+    /// Unix seconds of the last input the user sent to this session. Unlike
+    /// `last_active`, a pause and a resume leave it alone, so it answers whether the
+    /// session moved on since its recap was taken.
+    #[serde(default)]
+    pub last_input: u64,
+    /// What the session was doing when it last paused, kept only when the setting
+    /// asks for it. Zero or one per session; a later pause replaces it.
+    #[serde(default)]
+    pub recap: Option<String>,
+    /// Unix seconds the recap was taken. A pause with `last_active` no later than
+    /// this had no interaction to summarise, so it costs no call to the model.
+    #[serde(default)]
+    pub recap_at: u64,
 }
 
 impl SessionRecord {
@@ -479,6 +492,9 @@ mod tests {
             }],
             started: true,
             last_active: 0,
+            last_input: 0,
+            recap: None,
+            recap_at: 0,
         }];
         project
     }

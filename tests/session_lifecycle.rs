@@ -4,7 +4,7 @@
 //! Test code may use `expect` with a message. Library code may not.
 #![allow(clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
@@ -13,7 +13,7 @@ use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
 use culm::pty::SessionSpec;
 use culm::store::Store;
-use culm::testing::{FakeClock, FakeGit, FakeMemoryProbe, FakeSpawner, MemoryStore};
+use culm::testing::{FakeClock, FakeGit, FakeMemoryProbe, FakeRecapper, FakeSpawner, MemoryStore};
 use culm::ui::HitBox;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -53,6 +53,9 @@ fn record(name: &str, state: SessionState) -> SessionRecord {
         repos: Vec::new(),
         started: true,
         last_active: 0,
+        last_input: 0,
+        recap: None,
+        recap_at: 0,
     }
 }
 
@@ -74,6 +77,7 @@ struct Fakes {
     git: FakeGit,
     store: MemoryStore,
     clock: FakeClock,
+    recapper: FakeRecapper,
 }
 
 impl Fakes {
@@ -87,6 +91,7 @@ impl Fakes {
             git: FakeGit::default(),
             store: MemoryStore::new(),
             clock: FakeClock::new(1_000),
+            recapper: FakeRecapper::new(),
         }
     }
 
@@ -95,6 +100,7 @@ impl Fakes {
             spawner: &self.spawner,
             git: &self.git,
             store: &self.store,
+            recapper: &self.recapper,
             clock: &self.clock,
         }
     }
@@ -900,6 +906,252 @@ fn press_quit(app: &mut App, f: &Fakes) {
         .expect("quit is handled");
 }
 
+/// A live session whose transcript exists, which is what a recap needs.
+fn session_with_transcript(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    app.set_config(culm::config::Config {
+        recap_on_pause: true,
+    });
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let id = app.entries()[0].record.id.clone();
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(Path::new(ROOT)),
+        &id,
+        0,
+        "",
+    );
+    app
+}
+
+fn recap_of(app: &App) -> Option<String> {
+    app.entries()[0].record.recap.clone()
+}
+
+#[test]
+fn the_settings_open_on_their_own_binding_and_close_again() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+
+    app.on_key(&key(KeyCode::Char('S'), KeyModifiers::ALT), &f.deps())
+        .expect("the settings open");
+    assert!(app.settings_open());
+
+    app.on_key(&key(KeyCode::Esc, KeyModifiers::NONE), &f.deps())
+        .expect("the settings close");
+    assert!(!app.settings_open());
+}
+
+#[test]
+fn space_flips_the_switch_and_writes_it_at_once() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.on_key(&key(KeyCode::Char('S'), KeyModifiers::ALT), &f.deps())
+        .expect("the settings open");
+
+    app.on_key(&key(KeyCode::Char(' '), KeyModifiers::NONE), &f.deps())
+        .expect("the switch flips");
+
+    assert!(app.config().recap_on_pause);
+    assert!(
+        f.store.load_config().expect("settings load").recap_on_pause,
+        "a global setting does not wait on a project to be saved"
+    );
+}
+
+#[test]
+fn no_key_reaches_a_child_while_the_settings_are_open() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
+    app.on_key(&key(KeyCode::Char('S'), KeyModifiers::ALT), &f.deps())
+        .expect("the settings open");
+    let before = pty.written_utf8();
+
+    app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is swallowed");
+
+    assert_eq!(pty.written_utf8(), before);
+}
+
+#[test]
+fn pausing_takes_no_recap_while_the_setting_is_off() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(Path::new(ROOT)),
+        "x",
+        0,
+        "",
+    );
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    assert!(f.recapper.asked().is_empty(), "the model was never called");
+    assert_eq!(recap_of(&app), None);
+}
+
+#[test]
+fn pausing_keeps_what_the_session_says_it_was_doing() {
+    let f = Fakes::new();
+    f.recapper
+        .answers("refining CLUB-1137, next is the period design");
+    let mut app = session_with_transcript(&f);
+    let id = app.entries()[0].record.id.clone();
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    assert_eq!(f.recapper.asked(), vec![id], "the paused session was asked");
+    assert_eq!(
+        recap_of(&app).as_deref(),
+        Some("refining CLUB-1137, next is the period design")
+    );
+}
+
+#[test]
+fn a_recap_reaches_the_saved_state() {
+    let f = Fakes::new();
+    f.recapper.answers("did a thing");
+    let mut app = session_with_transcript(&f);
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("the tick writes");
+
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert_eq!(saved.sessions[0].recap.as_deref(), Some("did a thing"));
+}
+
+#[test]
+fn a_session_with_no_transcript_is_left_alone() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.set_config(culm::config::Config {
+        recap_on_pause: true,
+    });
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    assert!(
+        f.recapper.asked().is_empty(),
+        "a session killed young has nothing to read"
+    );
+    assert_eq!(recap_of(&app), None);
+}
+
+#[test]
+fn pausing_again_with_nothing_in_between_costs_no_call() {
+    let f = Fakes::new();
+    f.recapper.answers("the first answer");
+    let mut app = session_with_transcript(&f);
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+    assert_eq!(f.recapper.asked().len(), 1);
+
+    f.clock.set(2_000);
+    app.toggle_pause(&f.deps()).expect("one resumes");
+    app.toggle_pause(&f.deps()).expect("one pauses again");
+    app.poll_recap(&f.deps());
+
+    assert_eq!(f.recapper.asked().len(), 1, "nothing happened in between");
+    assert_eq!(recap_of(&app).as_deref(), Some("the first answer"));
+}
+
+#[test]
+fn pausing_after_a_keystroke_takes_a_fresh_recap() {
+    let f = Fakes::new();
+    f.recapper.answers("the first answer");
+    let mut app = session_with_transcript(&f);
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    f.clock.set(2_000);
+    app.toggle_pause(&f.deps()).expect("one resumes");
+    app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
+        .expect("a keystroke reaches the session");
+    f.recapper.answers("the second answer");
+    app.toggle_pause(&f.deps()).expect("one pauses again");
+    app.poll_recap(&f.deps());
+
+    assert_eq!(f.recapper.asked().len(), 2, "the session moved on");
+    assert_eq!(recap_of(&app).as_deref(), Some("the second answer"));
+}
+
+#[test]
+fn a_recap_that_fails_keeps_a_plain_message() {
+    let f = Fakes::new();
+    f.recapper.fails("claude exited with 1");
+    let mut app = session_with_transcript(&f);
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    assert_eq!(
+        recap_of(&app).as_deref(),
+        Some(culm::recap::RECAP_UNAVAILABLE),
+        "the reason is never the user's problem"
+    );
+}
+
+#[test]
+fn a_recap_that_will_not_answer_is_given_up_on() {
+    let f = Fakes::new();
+    f.recapper.takes_passes(10_000);
+    let mut app = session_with_transcript(&f);
+    app.toggle_pause(&f.deps()).expect("one pauses");
+
+    app.poll_recap(&f.deps());
+    assert_eq!(recap_of(&app), None, "still waiting inside the limit");
+
+    f.clock.set(1_000 + 46);
+    app.poll_recap(&f.deps());
+
+    assert_eq!(
+        recap_of(&app).as_deref(),
+        Some(culm::recap::RECAP_UNAVAILABLE)
+    );
+}
+
+#[test]
+fn a_recapper_that_will_not_start_keeps_a_plain_message() {
+    let f = Fakes::new();
+    f.recapper.refuses_to_start();
+    let mut app = session_with_transcript(&f);
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+
+    assert_eq!(
+        recap_of(&app).as_deref(),
+        Some(culm::recap::RECAP_UNAVAILABLE)
+    );
+}
+
+#[test]
+fn a_recap_that_says_there_is_nothing_to_recap_is_not_kept_as_one() {
+    let f = Fakes::new();
+    f.recapper
+        .answers("Nothing to recap yet — send a message first.");
+    let mut app = session_with_transcript(&f);
+
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.poll_recap(&f.deps());
+
+    assert_eq!(
+        recap_of(&app).as_deref(),
+        Some(culm::recap::RECAP_UNAVAILABLE)
+    );
+}
+
 #[test]
 fn a_quit_asks_every_child_to_leave_without_blocking() {
     let f = Fakes::new();
@@ -1516,6 +1768,9 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         }],
         started: true,
         last_active: 0,
+        last_input: 0,
+        recap: None,
+        recap_at: 0,
     }];
     f.store.put_project(&project);
     f.store.put_claude_dirs([

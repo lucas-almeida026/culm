@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use ratatui::layout::{Position, Rect};
 
 use crate::clock::Clock;
+use crate::config::Config;
 use crate::git::Git;
 use crate::hooks::{Attention, HookEvent};
 use crate::keys::{HostAction, host_action};
@@ -15,6 +16,7 @@ use crate::project::{
     Project, SessionRecord, SessionRepo, SessionState, slugify, system_prompt, unique_slug,
 };
 use crate::pty::{PtySpawner, SessionSpec};
+use crate::recap::{RECAP_UNAVAILABLE, RecapJob, Recapper};
 use crate::session::Session;
 use crate::stats::MemoryProbe;
 use crate::store::Store;
@@ -47,6 +49,10 @@ const CLOSE_GRACE_SECS: u64 = 3;
 /// lands near a tenth of a second, which is readable.
 const SPINNER_EVERY: u64 = 20;
 
+/// Seconds a recap may take before culm gives up on it. The model reads a whole
+/// transcript, and a long one is slow.
+const RECAP_LIMIT_SECS: u64 = 45;
+
 /// How long the report of a forced quit stays on the bar, in seconds.
 const FORCED_QUIT_NOTICE_SECS: u64 = 5;
 
@@ -57,6 +63,7 @@ pub struct Deps<'a> {
     pub git: &'a dyn Git,
     pub store: &'a dyn Store,
     pub clock: &'a dyn Clock,
+    pub recapper: &'a dyn Recapper,
 }
 
 impl std::fmt::Debug for Deps<'_> {
@@ -166,6 +173,17 @@ struct Closing {
     forced: bool,
 }
 
+/// A recap being fetched for one paused session.
+#[derive(Debug)]
+struct RecapWork {
+    /// The session the answer belongs to. An index would not survive a reorder.
+    id: String,
+    name: String,
+    job: Box<dyn RecapJob>,
+    /// Unix seconds past which the work is abandoned.
+    deadline: u64,
+}
+
 /// A wheel notch culm handed to a child, waiting to be measured.
 ///
 /// The child repaints when it pleases, so the distance its text moved is not known
@@ -187,6 +205,9 @@ pub enum Modal {
     Rename(Rename),
     /// The shortcut table. It reads state and changes none, so it holds no data.
     Help,
+    /// The settings that apply to every project. One switch so far, so the cursor
+    /// has nowhere else to be and the form holds no data either.
+    Settings,
 }
 
 #[derive(Debug)]
@@ -224,6 +245,10 @@ pub struct App {
     pending_scroll: Option<PendingScroll>,
     /// The quit in progress, if any.
     closing: Option<Closing>,
+    /// Settings shared by every project.
+    config: Config,
+    /// The recap being fetched, if any. One at a time.
+    recap_work: Option<RecapWork>,
     /// Unix seconds after which the status message stops showing. A message with no
     /// deadline stays until something replaces it.
     status_until: Option<u64>,
@@ -265,6 +290,8 @@ impl App {
             selection: None,
             pending_scroll: None,
             closing: None,
+            config: Config::default(),
+            recap_work: None,
             status_until: None,
             clipboard: String::new(),
             copied: None,
@@ -495,6 +522,12 @@ impl App {
         matches!(self.modal, Some(Modal::Help))
     }
 
+    /// True while the settings are on screen.
+    #[must_use]
+    pub fn settings_open(&self) -> bool {
+        matches!(self.modal, Some(Modal::Settings))
+    }
+
     /// The rename form, when that is the form on screen.
     #[must_use]
     pub fn rename_form(&self) -> Option<&Rename> {
@@ -546,6 +579,16 @@ impl App {
             return 0;
         }
         usize::try_from(polls / SPINNER_EVERY % frames as u64).unwrap_or(0)
+    }
+
+    /// Hands over the settings read at startup.
+    pub fn set_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     pub fn set_hooks_installed(&mut self, installed: bool) {
@@ -628,6 +671,7 @@ impl App {
             Some(HostAction::DeleteSession) => self.open_delete(),
             Some(HostAction::RenameSession) => self.open_rename(),
             Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
+            Some(HostAction::ShowSettings) => self.modal = Some(Modal::Settings),
             Some(HostAction::FindSession) => {
                 self.filter_focused = !self.filter_focused;
                 self.selection = None;
@@ -657,8 +701,8 @@ impl App {
                 }
                 return Ok(());
             }
-            // Neither the confirmation nor the help takes text.
-            Some(Modal::ConfirmDelete(_) | Modal::Help) => return Ok(()),
+            // The confirmation, the help and the settings take no text.
+            Some(Modal::ConfirmDelete(_) | Modal::Help | Modal::Settings) => return Ok(()),
             Some(Modal::Rename(rename)) => {
                 rename.name.push_str(text);
                 return Ok(());
@@ -695,8 +739,11 @@ impl App {
         if entry.attention == Attention::NeedsPermission {
             entry.attention = Attention::None;
         }
-        if entry.record.last_active != self.now {
+        // A pause and a resume stamp `last_active` too, so the input carries its own
+        // mark: the recap only wants to know whether the user did anything.
+        if entry.record.last_active != self.now || entry.record.last_input != self.now {
             entry.record.last_active = self.now;
+            entry.record.last_input = self.now;
             self.dirty = true;
         }
         if let Some(session) = entry.live.as_mut() {
@@ -970,6 +1017,20 @@ impl App {
                 }
                 return Ok(());
             }
+            Some(Modal::Settings) => {
+                // Space flips the switch the cursor is on, which is the only one.
+                if key.code == KeyCode::Char(' ') {
+                    self.config.recap_on_pause = !self.config.recap_on_pause;
+                    // Settings are global, so they are written at once rather than
+                    // waiting on a project to be saved.
+                    deps.store.save_config(&self.config)?;
+                } else if matches!(key.code, KeyCode::Esc | KeyCode::Enter)
+                    || host_action(key) == Some(HostAction::ShowSettings)
+                {
+                    self.modal = None;
+                }
+                return Ok(());
+            }
             Some(Modal::Help) => {
                 // The help changes nothing, so any key that dismisses a dialog
                 // dismisses it, and no other key reaches a child.
@@ -1081,6 +1142,9 @@ impl App {
             repos,
             started: false,
             last_active: deps.clock.now_secs(),
+            last_input: 0,
+            recap: None,
+            recap_at: 0,
         };
 
         match self.start(&record, deps) {
@@ -1128,11 +1192,13 @@ impl App {
                 session.terminate().ok();
                 session.wait_for_exit(TERMINATE_GRACE);
             }
+            let interacted = entry.record.last_input;
             entry.record.state = SessionState::Paused;
             entry.record.last_active = now;
             entry.attention = Attention::None;
             entry.rss = 0;
-            self.status_text = format!("{} paused", record.name);
+            self.set_status(format!("{} paused", record.name));
+            self.start_recap(self.entry_focus, interacted, deps);
         } else {
             if self.active_count() >= MAX_ACTIVE {
                 self.status_text =
@@ -1160,6 +1226,96 @@ impl App {
         self.reorder();
         self.focus_id(&record.id);
         self.save(deps)
+    }
+
+    /// Asks a paused session what it was doing, when the setting asks for it.
+    ///
+    /// The child is already gone by now: Claude Code refuses to resume a session it
+    /// still lists as running, so the recap can only follow the pause, never run
+    /// beside it.
+    fn start_recap(&mut self, index: usize, interacted: u64, deps: &Deps<'_>) {
+        if !self.config.recap_on_pause || self.recap_work.is_some() {
+            return;
+        }
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        // Nothing happened since the last recap, so the old one still describes the
+        // session and the model is not asked again.
+        if entry.record.recap.is_some() && interacted <= entry.record.recap_at {
+            return;
+        }
+        // A session killed young never wrote a transcript, and there is nothing to
+        // read. That is not a failure worth reporting.
+        if !self.has_transcript(&entry.record, deps) {
+            return;
+        }
+        let (id, name, cwd) = (
+            entry.record.id.clone(),
+            entry.record.name.clone(),
+            entry.record.cwd.clone(),
+        );
+        match deps.recapper.start(&id, &cwd) {
+            Ok(job) => {
+                self.set_status(format!("recapping {name}…"));
+                self.recap_work = Some(RecapWork {
+                    id,
+                    name,
+                    job,
+                    deadline: deps.clock.now_secs().saturating_add(RECAP_LIMIT_SECS),
+                });
+            }
+            Err(_) => self.store_recap(&id, RECAP_UNAVAILABLE.to_string(), deps),
+        }
+    }
+
+    /// True when Claude Code has written a transcript for this session.
+    fn has_transcript(&self, record: &SessionRecord, deps: &Deps<'_>) -> bool {
+        let dir = crate::project::transcript_dir_name(&record.cwd);
+        deps.store
+            .list_transcripts(&dir)
+            .map(|files| files.iter().any(|f| f.id == record.id))
+            .unwrap_or(false)
+    }
+
+    /// Carries a recap forward by one pass. The loop calls this every time round.
+    pub fn poll_recap(&mut self, deps: &Deps<'_>) {
+        let Some(mut work) = self.recap_work.take() else {
+            return;
+        };
+        let answer = match work.job.poll() {
+            Some(Ok(text)) => crate::recap::clean(&text),
+            Some(Err(_)) => String::new(),
+            None => {
+                if deps.clock.now_secs() <= work.deadline {
+                    self.recap_work = Some(work);
+                    return;
+                }
+                // The model reads a whole transcript, and a long one can outlast any
+                // patience the user has. Give up rather than hold the session open.
+                work.job.kill();
+                String::new()
+            }
+        };
+        let name = work.name.clone();
+        let text = if answer.is_empty() {
+            RECAP_UNAVAILABLE.to_string()
+        } else {
+            answer
+        };
+        self.store_recap(&work.id, text, deps);
+        self.set_status(format!("{name} recapped"));
+    }
+
+    /// Keeps a recap against the session it belongs to, found by id because the list
+    /// reorders as sessions pause.
+    fn store_recap(&mut self, id: &str, text: String, deps: &Deps<'_>) {
+        let now = deps.clock.now_secs();
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.record.id == id) {
+            entry.record.recap = Some(text);
+            entry.record.recap_at = now;
+            self.dirty = true;
+        }
     }
 
     /// Once a second: reap a child that ended on its own, and sample memory.

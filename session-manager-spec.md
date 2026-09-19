@@ -225,32 +225,40 @@ Every reserved key stops belonging to the Claude Code process. Keep the reserved
 120. Delete the focused session with `Alt+Shift+X`. Offer the binding only for a paused session, which is how requirement 43 reaches the user.
 121. Rename the focused session with `Alt+Shift+R`.
 122. Focus the search box with `Alt+Shift+F`. A click on the search row focuses it as well.
-123. Open the shortcut table with `Alt+Shift+H`.
+123. Open the shortcut table with `Alt+Shift+H`, and the settings with `Alt+Shift+S`.
 124. Address the active half with a digit. Reach a paused session with a mouse click, or through the search box.
 
 ### Configuration
 
-125. Read one configuration file in TOML form from `~/.config/culm/config.toml`.
-126. Hold every key binding in the configuration file. Ship the defaults in the binary.
-127. Override one binding without restating the rest.
-128. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
-129. Read the nerd mode default from the same file.
+125. Read one configuration file in TOML form from `$XDG_CONFIG_HOME/culm/config.toml`, or `~/.config/culm/config.toml` when the variable is unset. A missing file, a missing key and an empty file all read as the defaults, so culm runs with no configuration at all.
+126. Hold `recap-on-pause` in that file, off by default. Read and change it with `culm config list` and `culm config set`, reporting an unknown key and an unreadable value separately.
+127. Show the settings on `Alt+Shift+S`. `Space` flips the switch the cursor is on, and the change is written at once, because a setting belongs to no project.
+128. Hold every key binding in the configuration file. Ship the defaults in the binary.
+129. Override one binding without restating the rest.
+130. Report an unknown action name and an unparsable binding at load. Name the file and the line. Do not ignore the entry.
+131. Read the nerd mode default from the same file.
 
 ### Statistics
 
-130. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
-131. Sample memory once per second. Render the last sample.
-132. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
-133. Reach `/proc` through a trait, so that a test supplies a fake.
+132. Show the resident memory of each session on its sidebar row. Read `VmRSS` from `/proc/<pid>/status` and sum the process tree of the session.
+133. Sample memory once per second. Render the last sample.
+134. Show the frame rate in the top right corner under nerd mode. Keep nerd mode off by default.
+135. Reach `/proc` through a trait, so that a test supplies a fake.
 
 One Claude Code process measured about 436 MB of resident memory on 2026-09-02. Memory, and not render cost, is the limit on the session count.
 
 ### Persistence
 
-134. On closing a project, pause every session and record which sessions were active.
-135. On opening a project, restore both halves of the session list to the recorded state.
-136. Survive a reboot through the saved state, because a reboot ends every terminal process.
-137. Remember the width of the sidebar for each project, and open the project at that width. The width is a count of terminal columns, between 20 and 60, the same range a drag obeys, so a hand-edited file never widens the sidebar past what the interface allows. A project file written before culm remembered this opens at 30.
+136. On closing a project, pause every session and record which sessions were active.
+137. On opening a project, restore both halves of the session list to the recorded state.
+138. Survive a reboot through the saved state, because a reboot ends every terminal process.
+139. Remember the width of the sidebar for each project, and open the project at that width. The width is a count of terminal columns, between 20 and 60, the same range a drag obeys, so a hand-edited file never widens the sidebar past what the interface allows. A project file written before culm remembered this opens at 30.
+140. Ask a session what it was doing when it pauses, and keep the answer, while `recap-on-pause` is on. Run `claude -p --no-session-persistence --resume <id> /recap` once the child is gone. Claude Code refuses to resume a session it still lists as running, and without that flag the resume appends to the real transcript and moves the time culm reads as its last use.
+141. Keep zero or one recap per session. A later pause replaces it, and a resume leaves it alone.
+142. Take no recap when nothing reached the session since the last one, so an idle pause costs no call to the model. A pause and a resume are not interactions.
+143. Take no recap when the session has no transcript yet, which is the case for one killed young.
+144. Give a recap forty-five seconds and then abandon it. Keep one plain message whenever a recap could not be had, whatever the reason, because the reason is never the user's problem.
+145. Show the recap in the panel of a paused session, above the text that says it is paused.
 
 ## Out of scope
 

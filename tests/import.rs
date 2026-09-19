@@ -244,6 +244,9 @@ fn an_active_session_is_never_imported_twice() {
         repos: Vec::new(),
         started: true,
         last_active: 5,
+        last_input: 0,
+        recap: None,
+        recap_at: 0,
     });
     f.store.put_transcript(
         ROOT_DIR,
@@ -407,11 +410,13 @@ fn an_imported_session_resumes_its_own_transcript() {
 
     let spawner = FakeSpawner::new(Vec::new());
     let clock = culm::testing::FakeClock::new(1_000);
+    let recapper = culm::testing::FakeRecapper::new();
     let deps = culm::app::Deps {
         spawner: &spawner,
         git: &f.git,
         store: &f.store,
         clock: &clock,
+        recapper: &recapper,
     };
     let mut app = culm::app::App::open(project, &deps, 20, 50);
     app.set_focus(0);

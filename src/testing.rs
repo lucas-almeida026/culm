@@ -243,6 +243,102 @@ impl Read for NeverEnds {
     }
 }
 
+/// Hands out recap jobs a test finishes on demand, and records what was asked for.
+#[derive(Debug, Clone)]
+pub struct FakeRecapper {
+    asked: Arc<Mutex<Vec<String>>>,
+    answer: Arc<Mutex<Result<String, String>>>,
+    /// Passes a job runs before it answers. Zero answers on the first poll.
+    delay: Arc<AtomicU64>,
+    refuse_to_start: Arc<AtomicBool>,
+}
+
+impl Default for FakeRecapper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeRecapper {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            answer: Arc::new(Mutex::new(Ok("did the thing".to_string()))),
+            delay: Arc::new(AtomicU64::new(0)),
+            refuse_to_start: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The session ids culm asked about, in order.
+    #[must_use]
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.asked).clone()
+    }
+
+    pub fn answers(&self, text: &str) {
+        *lock(&self.answer) = Ok(text.to_string());
+    }
+
+    pub fn fails(&self, why: &str) {
+        *lock(&self.answer) = Err(why.to_string());
+    }
+
+    /// Makes a job take this many passes, so a test can let the limit run out.
+    pub fn takes_passes(&self, passes: u64) {
+        self.delay.store(passes, Ordering::Relaxed);
+    }
+
+    pub fn refuses_to_start(&self) {
+        self.refuse_to_start.store(true, Ordering::Relaxed);
+    }
+}
+
+impl crate::recap::Recapper for FakeRecapper {
+    fn start(
+        &self,
+        session_id: &str,
+        _cwd: &std::path::Path,
+    ) -> Result<Box<dyn crate::recap::RecapJob>> {
+        if self.refuse_to_start.load(Ordering::Relaxed) {
+            return Err(anyhow!("fake recapper refused to start"));
+        }
+        lock(&self.asked).push(session_id.to_string());
+        Ok(Box::new(FakeRecapJob {
+            left: self.delay.load(Ordering::Relaxed),
+            answer: lock(&self.answer).clone(),
+            killed: false,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct FakeRecapJob {
+    left: u64,
+    answer: Result<String, String>,
+    killed: bool,
+}
+
+impl crate::recap::RecapJob for FakeRecapJob {
+    fn poll(&mut self) -> Option<Result<String>> {
+        if self.killed {
+            return Some(Err(anyhow!("killed")));
+        }
+        if self.left > 0 {
+            self.left -= 1;
+            return None;
+        }
+        Some(match &self.answer {
+            Ok(text) => Ok(text.clone()),
+            Err(why) => Err(anyhow!("{why}")),
+        })
+    }
+
+    fn kill(&mut self) {
+        self.killed = true;
+    }
+}
+
 /// Records every worktree culm asked for, and fails on demand.
 #[derive(Debug, Default, Clone)]
 pub struct FakeGit {
@@ -323,6 +419,7 @@ pub struct MemoryStore {
     claude_dirs: Arc<Mutex<Vec<String>>>,
     /// Transcript text by directory and id, and the time each file carries.
     transcripts: Arc<Mutex<std::collections::HashMap<TranscriptKey, TranscriptValue>>>,
+    config: Arc<Mutex<crate::config::Config>>,
 }
 
 impl Default for MemoryStore {
@@ -335,6 +432,7 @@ impl Default for MemoryStore {
             removed_transcripts: Arc::new(Mutex::new(Vec::new())),
             claude_dirs: Arc::new(Mutex::new(Vec::new())),
             transcripts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            config: Arc::new(Mutex::new(crate::config::Config::default())),
         }
     }
 }
@@ -358,6 +456,11 @@ impl MemoryStore {
 
     pub fn put_project(&self, project: &crate::project::Project) {
         lock(&self.projects).insert(project.slug.clone(), project.clone());
+    }
+
+    /// Seeds the settings, so a test opens with the recap already switched on.
+    pub fn put_config(&self, config: crate::config::Config) {
+        *lock(&self.config) = config;
     }
 
     pub fn put_settings(&self, settings: serde_json::Value) {
@@ -434,6 +537,15 @@ impl crate::store::Store for MemoryStore {
 
     fn list_claude_dirs(&self) -> Result<Vec<String>> {
         Ok(lock(&self.claude_dirs).clone())
+    }
+
+    fn load_config(&self) -> Result<crate::config::Config> {
+        Ok(lock(&self.config).clone())
+    }
+
+    fn save_config(&self, config: &crate::config::Config) -> Result<()> {
+        *lock(&self.config) = config.clone();
+        Ok(())
     }
 
     fn remove_claude_dir(&self, name: &str) -> Result<()> {

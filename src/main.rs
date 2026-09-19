@@ -14,6 +14,7 @@ use culm::git::SystemGit;
 use culm::namer::ClaudeNamer;
 use culm::project::Project;
 use culm::pty::SystemPtySpawner;
+use culm::recap::ClaudeRecapper;
 use culm::stats::ProcMemoryProbe;
 use culm::store::{FsStore, Store};
 use culm::{cli, clipboard, hooks, ui};
@@ -110,11 +111,13 @@ fn run(
     let git = SystemGit;
     let probe = ProcMemoryProbe;
     let clock = SystemClock;
+    let recapper = ClaudeRecapper;
     let deps = Deps {
         spawner: &spawner,
         git: &git,
         store,
         clock: &clock,
+        recapper: &recapper,
     };
 
     // The first sessions start before the first draw, so the panel size is derived
@@ -131,6 +134,7 @@ fn run(
     let (rows, cols) = ui::panel_size(panel);
 
     let mut app = App::open(project, &deps, rows, cols);
+    app.set_config(store.load_config().unwrap_or_default());
     app.set_hooks_installed(hooks_installed);
     app.set_keyboard_enhanced(keyboard_enhanced);
 
@@ -164,6 +168,9 @@ fn run(
         // A quit waits on children culm does not control. The wait runs here, a pass
         // at a time, so the closing screen keeps drawing instead of freezing.
         app.poll_close(&deps)?;
+
+        // A recap runs as a headless child after a pause, so it is polled here too.
+        app.poll_recap(&deps);
 
         // A child that paints its own scrolling repaints after the notch reaches it,
         // so the distance its text moved is measured here, on a later pass.

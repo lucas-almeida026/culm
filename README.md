@@ -40,11 +40,11 @@ One gap is worth knowing: no hook reports that you answered a permission prompt,
 
 **Keys go through one translation table.** culm asks the terminal for the kitty keyboard protocol and uses it when the answer is yes, because it reports a modified key as a single unambiguous event. A terminal that says no runs the legacy path instead; the protocol is an enhancement and never a requirement. The bottom bar names which mode you got.
 
-**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 271 cases without starting a process, touching disk outside a temporary directory, or sleeping.
+**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 296 cases without starting a process, touching disk outside a temporary directory, or sleeping.
 
 ## What it is
 
-One Rust binary, for Linux. Early, and in use daily. The TOML configuration file is the one planned piece not built yet.
+One Rust binary, for Linux. Early, and in use daily. The configuration file holds one setting so far; key bindings are still fixed in the binary.
 
 Register a project and open it:
 
@@ -62,13 +62,18 @@ culm project import                # pull in sessions that appeared since
 culm                               # open the project that owns this directory
 culm open --import-native-sessions # import, then open
 culm project rm <project>          # unregister it, never deletes source or branches
+culm config list                   # settings that apply to every project
+culm config set recap-on-pause true
+                                   # keep a recap of what a session was doing
 ```
 
 A project name becomes a slug, so `--name "Billing Rewrite"` gives you `culm open billing-rewrite`. A name another project already holds is refused rather than numbered. A rename moves the saved state and keeps the root, the repositories, and every session.
 
 An import keeps the session id of each transcript, so resuming one reaches the same conversation. It takes the name from the title the session carries inside Claude Code. A session that was never named there is named by a headless `claude -p --model haiku` child reading the first prompt. Every imported session arrives paused.
 
-Inside the interface, `Alt+Shift+H` shows the table of every binding. The bottom bar points at it against the left edge at all times, names the keyboard mode the host terminal gave culm, and puts whatever last happened against the right edge. In short: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+R` renames it, `Alt+Shift+F` searches the paused list, `Alt+Shift+X` deletes a paused one after a yes or no confirmation, `Alt+Shift+D` toggles nerd mode, `Ctrl+q` quits. A quit shows a spinner while the sessions leave, and pressing it again stops waiting and kills them — the next open says so for a few seconds. A click focuses any row, and the separator drags to resize the sidebar between 20 and 60 columns. Each project remembers the width it was left at and opens there again.
+Inside the interface, `Alt+Shift+H` shows the table of every binding. The bottom bar points at it against the left edge at all times, names the keyboard mode the host terminal gave culm, and puts whatever last happened against the right edge. In short: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+R` renames it, `Alt+Shift+F` searches the paused list, `Alt+Shift+X` deletes a paused one after a yes or no confirmation, `Alt+Shift+D` toggles nerd mode, `Alt+Shift+S` opens the settings, `Ctrl+q` quits. A quit shows a spinner while the sessions leave, and pressing it again stops waiting and kills them — the next open says so for a few seconds. A click focuses any row, and the separator drags to resize the sidebar between 20 and 60 columns. Each project remembers the width it was left at and opens there again.
+
+Switch on `recap-on-pause` and a session says what it was doing when you come back to it. Pausing runs a headless `claude -p --no-session-persistence --resume <id> /recap` once the child is gone, and the answer sits above `paused` in the panel. That flag matters: without it the resume would append to the real transcript. The recap is skipped when nothing reached the session since the last one, so an idle pause costs nothing, and it is off by default because every other pause costs a call to the model.
 
 The paused list is ordered by last use, newest first. `Alt+Shift+F` puts the cursor in the search box above it, which filters by name on every keystroke. `Enter` lands on the first match, and `Esc` clears the filter.
 

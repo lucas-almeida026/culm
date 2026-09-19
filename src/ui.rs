@@ -109,6 +109,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         Some(Modal::ConfirmDelete(confirm)) => buttons = draw_confirm(f, confirm, panel),
         Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
         Some(Modal::Help) => draw_help(f, panel),
+        Some(Modal::Settings) => draw_settings(f, app, panel),
         None => {}
     }
 
@@ -341,9 +342,28 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     match entry.live.as_ref() {
         Some(session) => draw_terminal(f, session, title_of(entry.name(), session), area),
         None => {
+            let mut lines = Vec::new();
+            // What the session was doing comes first, because that is what the user
+            // came back to read. The hint below it never changes.
+            if let Some(recap) = entry.record.recap.as_deref() {
+                lines.push(Line::from(Span::styled(
+                    "last recap",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    recap.to_string(),
+                    Style::default().fg(Color::White),
+                )));
+                lines.push(Line::from(""));
+            }
+            lines.push(dim("paused"));
+            lines.push(Line::from(""));
+            lines.push(dim("Alt+Shift+P resumes this session."));
             f.render_widget(
-                Paragraph::new("paused\n\nAlt+Shift+P resumes this session.")
-                    .style(Style::default().fg(Color::DarkGray))
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
                     .block(Block::bordered().title(title)),
                 area,
             );
@@ -443,7 +463,7 @@ const WARN_LONG: &str = "markers off, run: culm hooks install";
 const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
-const SHORTCUTS: [(&str, &str); 15] = [
+const SHORTCUTS: [(&str, &str); 16] = [
     ("Alt+0", "focus the shell at position 0"),
     ("Alt+1 to Alt+9", "focus an active session"),
     ("Alt+Shift+N", "create a session"),
@@ -453,6 +473,7 @@ const SHORTCUTS: [(&str, &str); 15] = [
     ("Alt+Shift+X", "delete the focused paused session"),
     ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
     ("Alt+Shift+H", "this table"),
+    ("Alt+Shift+S", "settings for every project"),
     ("Ctrl+q", "quit"),
     ("Shift+PageUp/Down", "scroll half a panel"),
     ("wheel", "scroll, or reach a mouse-aware child"),
@@ -462,6 +483,39 @@ const SHORTCUTS: [(&str, &str); 15] = [
 ];
 
 /// The shortcut table. Everything else the bar used to list lives here.
+/// The settings that apply to every project. One switch so far.
+fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
+    let width = 64.min(panel.width.saturating_sub(2));
+    let height = 7.min(panel.height);
+    let area = Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let on = app.config().recap_on_pause;
+    let lines = vec![
+        Line::from(vec![
+            // The cursor has nowhere else to be, so the only row is always the one.
+            Span::styled(
+                if on { " [x] " } else { " [ ] " },
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ),
+            Span::raw("  store a recap before pausing a session"),
+        ]),
+        Line::from(""),
+        dim("  a paused session then says what it was doing."),
+        dim("  each pause costs one call to the model."),
+        Line::from(""),
+        dim(" Space toggles   Esc closes"),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" settings ")),
+        area,
+    );
+}
+
 fn draw_help(f: &mut Frame, panel: Rect) {
     let width = 64.min(panel.width.saturating_sub(2));
     let height = u16::try_from(SHORTCUTS.len() + 3)
@@ -763,7 +817,7 @@ mod tests {
     /// closing state stays put while the screen is read.
     fn closing_app() -> App {
         use crate::app::Deps;
-        use crate::testing::{FakeClock, FakeGit, FakeSpawner, MemoryStore};
+        use crate::testing::{FakeClock, FakeGit, FakeRecapper, FakeSpawner, MemoryStore};
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let spawner = FakeSpawner::new(Vec::new());
@@ -773,11 +827,13 @@ mod tests {
             MemoryStore::new(),
             FakeClock::new(1_000),
         );
+        let recapper = FakeRecapper::new();
         let deps = Deps {
             spawner: &spawner,
             git: &git,
             store: &store,
             clock: &clock,
+            recapper: &recapper,
         };
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         app.on_key(
@@ -926,17 +982,19 @@ mod tests {
     fn status_bar(width: u16, hooks_installed: bool) -> String {
         use crate::app::{App, Deps, NewSession};
         use crate::project::Project;
-        use crate::testing::{FakeClock, FakeGit, FakeSpawner, MemoryStore};
+        use crate::testing::{FakeClock, FakeGit, FakeRecapper, FakeSpawner, MemoryStore};
 
         let spawner = FakeSpawner::new(Vec::new());
         let git = FakeGit::default();
         let store = MemoryStore::new();
         let clock = FakeClock::new(1);
+        let recapper = FakeRecapper::new();
         let deps = Deps {
             spawner: &spawner,
             git: &git,
             store: &store,
             clock: &clock,
+            recapper: &recapper,
         };
         let mut app = App::new(Project::new("spm", "/home/x/spm"));
         // An empty name is refused, which is how a status reaches the bar here.

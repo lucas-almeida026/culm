@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
+use crate::config::SetError;
 use crate::git::Git;
 use crate::hooks;
 use crate::namer::Namer;
@@ -43,9 +44,25 @@ pub enum Command {
     /// Install or remove the Claude Code hook entries that feed attention markers.
     #[command(subcommand)]
     Hooks(HooksCmd),
+    /// Read or change the settings that apply to every project.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Hook client. Reads one payload on stdin and posts it to the interface.
     #[command(hide = true)]
     Hook,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCmd {
+    /// Show every setting and its value.
+    List,
+    /// Change one setting.
+    Set {
+        /// Setting name, as `config list` prints it.
+        key: String,
+        /// The new value. A switch takes true or false.
+        value: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +176,8 @@ pub fn run(
             cwd,
             import_native_sessions,
         ),
+        Some(Command::Config(ConfigCmd::List)) => config_list(store),
+        Some(Command::Config(ConfigCmd::Set { key, value })) => config_set(store, &key, &value),
         Some(Command::Hook) => {
             hooks::send_from_stdin();
             Ok(Outcome::Done)
@@ -403,6 +422,9 @@ pub fn import_sessions(
                 // The transcript exists, so the session has run and resumes.
                 started: true,
                 last_active: file.modified_secs,
+                last_input: 0,
+                recap: None,
+                recap_at: 0,
             });
             report.imported += 1;
         }
@@ -525,6 +547,31 @@ fn repo_rm(store: &dyn Store, name: &str, slug: Option<&str>, cwd: &Path) -> Res
 }
 
 /// Lists the repositories of a project, and where each one is checked out.
+fn config_list(store: &dyn Store) -> Result<Outcome> {
+    for (key, value) in store.load_config()?.settings() {
+        println!("{key:<20} {value}");
+    }
+    Ok(Outcome::Done)
+}
+
+fn config_set(store: &dyn Store, key: &str, value: &str) -> Result<Outcome> {
+    let mut config = store.load_config()?;
+    match config.set(key, value) {
+        Ok(()) => {
+            store.save_config(&config)?;
+            println!("{key} is now {value}");
+            Ok(Outcome::Done)
+        }
+        // The two mistakes are different, so they are reported differently.
+        Err(SetError::Key) => {
+            bail!("no setting is called {key}. run: culm config list")
+        }
+        Err(SetError::Value) => {
+            bail!("{key} does not take {value}. it takes true or false")
+        }
+    }
+}
+
 fn repo_list(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Outcome> {
     let project = resolve(store, slug, cwd)?;
     if project.repos.is_empty() {

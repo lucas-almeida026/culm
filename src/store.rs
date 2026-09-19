@@ -41,6 +41,9 @@ pub trait Store: fmt::Debug {
     fn read_transcript(&self, dir: &str, id: &str) -> Result<String>;
     /// Removes one whole directory under `~/.claude/projects`.
     fn remove_claude_dir(&self, name: &str) -> Result<()>;
+    /// The settings that apply to every project. A missing file reads as defaults.
+    fn load_config(&self) -> Result<crate::config::Config>;
+    fn save_config(&self, config: &crate::config::Config) -> Result<()>;
 }
 
 /// Reads and writes real files under the state directory.
@@ -49,6 +52,7 @@ pub struct FsStore {
     state_dir: PathBuf,
     claude_settings: PathBuf,
     claude_projects: PathBuf,
+    config_file: PathBuf,
 }
 
 impl FsStore {
@@ -61,10 +65,18 @@ impl FsStore {
             _ => home.join(".local/state"),
         }
         .join("culm");
+        // Settings are configuration, not state, so they sit under the config home
+        // rather than beside the registry.
+        let config_dir = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(x) if !x.is_empty() => PathBuf::from(x),
+            _ => home.join(".config"),
+        }
+        .join("culm");
         Ok(Self {
             state_dir,
             claude_settings: home.join(".claude/settings.json"),
             claude_projects: home.join(".claude/projects"),
+            config_file: config_dir.join("config.toml"),
         })
     }
 
@@ -74,8 +86,10 @@ impl FsStore {
         claude_settings: impl Into<PathBuf>,
         claude_projects: impl Into<PathBuf>,
     ) -> Self {
+        let state_dir = state_dir.into();
         Self {
-            state_dir: state_dir.into(),
+            config_file: state_dir.join("config.toml"),
+            state_dir,
             claude_settings: claude_settings.into(),
             claude_projects: claude_projects.into(),
         }
@@ -213,6 +227,23 @@ impl Store for FsStore {
         // more than a strict read, so the invalid bytes are replaced.
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn load_config(&self) -> Result<crate::config::Config> {
+        match std::fs::read_to_string(&self.config_file) {
+            Ok(text) => toml::from_str(&text)
+                .with_context(|| format!("parse {}", self.config_file.display())),
+            // No file is the ordinary case. culm runs with no configuration at all.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(crate::config::Config::default())
+            }
+            Err(e) => Err(e).with_context(|| format!("read {}", self.config_file.display())),
+        }
+    }
+
+    fn save_config(&self, config: &crate::config::Config) -> Result<()> {
+        let text = toml::to_string_pretty(config).context("write the settings as TOML")?;
+        write_atomic(&self.config_file, text.as_bytes())
     }
 
     fn remove_claude_dir(&self, name: &str) -> Result<()> {
