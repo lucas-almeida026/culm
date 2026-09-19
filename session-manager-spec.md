@@ -247,6 +247,7 @@ One Claude Code process measured about 436 MB of resident memory on 2026-09-02. 
 131. On closing a project, pause every session and record which sessions were active.
 132. On opening a project, restore both halves of the session list to the recorded state.
 133. Survive a reboot through the saved state, because a reboot ends every terminal process.
+134. Remember the width of the sidebar for each project, and open the project at that width. The width is a count of terminal columns, between 20 and 60, the same range a drag obeys, so a hand-edited file never widens the sidebar past what the interface allows. A project file written before culm remembered this opens at 30.
 
 ## Out of scope
 

@@ -21,9 +21,9 @@ use crate::store::Store;
 
 /// Nine sessions is the limit, because one digit addresses a session.
 pub const MAX_ACTIVE: usize = 9;
-pub const SIDEBAR_MIN: u16 = 20;
-pub const SIDEBAR_MAX: u16 = 60;
-pub const SIDEBAR_DEFAULT: u16 = 30;
+
+// The sidebar limits live with the project, because a project now saves its width.
+pub use crate::project::{SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN};
 
 /// Lines one notch of the wheel moves the view.
 const WHEEL_LINES: i32 = 3;
@@ -214,6 +214,8 @@ impl App {
     #[must_use]
     pub fn new(project: Project) -> Self {
         Self {
+            // Read before the project moves into the struct.
+            sidebar_width: project.sidebar_width(),
             project,
             entries: Vec::new(),
             shell: None,
@@ -221,7 +223,6 @@ impl App {
             shell_focused: false,
             entry_focus: 0,
             quit: false,
-            sidebar_width: SIDEBAR_DEFAULT,
             dragging: false,
             modal: None,
             status: String::new(),
@@ -1255,7 +1256,12 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
-                self.sidebar_width = column.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                let width = column.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                // A drag that ends where it started costs no write.
+                if width != self.sidebar_width {
+                    self.sidebar_width = width;
+                    self.dirty = true;
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
                 if let Some(selection) = self.selection.as_mut() {
@@ -1372,6 +1378,7 @@ impl App {
     fn save(&mut self, deps: &Deps<'_>) -> Result<()> {
         self.dirty = false;
         self.project.sessions = self.entries.iter().map(|e| e.record.clone()).collect();
+        self.project.view.sidebar_width = self.sidebar_width;
         deps.store.save_project(&self.project)
     }
 }

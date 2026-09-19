@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use culm::app::{App, Deps, SIDEBAR_DEFAULT};
+use culm::app::{App, Deps};
 use culm::cli::{Cli, Outcome};
 use culm::clock::SystemClock;
 use culm::git::SystemGit;
@@ -118,12 +118,14 @@ fn run(
     };
 
     // The first sessions start before the first draw, so the panel size is derived
-    // from the terminal rather than from a frame.
+    // from the terminal rather than from a frame. It uses the width the project was
+    // left at, or a restored sidebar would reflow every session on the first frame.
     let area = terminal.get_frame().area();
+    let sidebar = project.sidebar_width();
     let panel = Rect {
-        x: SIDEBAR_DEFAULT,
+        x: sidebar,
         y: 0,
-        width: area.width.saturating_sub(SIDEBAR_DEFAULT),
+        width: area.width.saturating_sub(sidebar),
         height: area.height.saturating_sub(1),
     };
     let (rows, cols) = ui::panel_size(panel);

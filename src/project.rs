@@ -4,6 +4,39 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// The narrowest sidebar the interface allows, in terminal columns. Two of those
+/// columns are the border, so the names have this figure less two to sit in.
+pub const SIDEBAR_MIN: u16 = 20;
+/// The widest sidebar the interface allows, in terminal columns.
+pub const SIDEBAR_MAX: u16 = 60;
+/// The sidebar a project opens at until the user drags the separator.
+pub const SIDEBAR_DEFAULT: u16 = 30;
+
+/// Interface state a project remembers between runs.
+///
+/// Only the sidebar width so far. It sits apart from the project's own data because
+/// it describes the view of a project rather than the project itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct View {
+    /// Terminal columns. A file written before culm remembered this holds none, and
+    /// reads as the default.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
+}
+
+// The derived default would be zero, which is not a width the interface allows.
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            sidebar_width: SIDEBAR_DEFAULT,
+        }
+    }
+}
+
+fn default_sidebar_width() -> u16 {
+    SIDEBAR_DEFAULT
+}
+
 /// A git repository that belongs to a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {
@@ -62,6 +95,8 @@ pub struct Project {
     pub repos: Vec<Repository>,
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
+    #[serde(default)]
+    pub view: View,
 }
 
 impl Project {
@@ -72,7 +107,15 @@ impl Project {
             root: root.into(),
             repos: Vec::new(),
             sessions: Vec::new(),
+            view: View::default(),
         }
+    }
+
+    /// The width to open the sidebar at, held inside the limits whatever the file
+    /// says. A hand-edited file never widens the sidebar past what a drag could.
+    #[must_use]
+    pub fn sidebar_width(&self) -> u16 {
+        self.view.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX)
     }
 
     #[must_use]
@@ -490,6 +533,46 @@ mod tests {
         assert!(dir_belongs_to(root, "-home-x-spm-api-mate", true));
         assert!(!dir_belongs_to(root, "-home-x-spm2", true));
         assert!(!dir_belongs_to(root, "-home-x-other", true));
+    }
+
+    #[test]
+    fn a_project_file_without_a_view_block_opens_at_the_default_width() {
+        let project: Project = serde_json::from_str(r#"{"slug":"spm","root":"/home/x/spm"}"#)
+            .expect("a file written before culm remembered the width still loads");
+        assert_eq!(project.sidebar_width(), SIDEBAR_DEFAULT);
+    }
+
+    #[test]
+    fn a_project_file_with_an_empty_view_block_opens_at_the_default_width() {
+        let project: Project =
+            serde_json::from_str(r#"{"slug":"spm","root":"/home/x/spm","view":{}}"#)
+                .expect("an empty view block still loads");
+        assert_eq!(project.sidebar_width(), SIDEBAR_DEFAULT);
+    }
+
+    #[test]
+    fn a_stored_width_is_returned_as_it_was_saved() {
+        let mut project = Project::new("spm", "/home/x/spm");
+        project.view.sidebar_width = 45;
+        assert_eq!(project.sidebar_width(), 45);
+    }
+
+    #[test]
+    fn a_stored_width_outside_the_limits_is_clamped_to_them() {
+        let mut project = Project::new("spm", "/home/x/spm");
+        project.view.sidebar_width = 200;
+        assert_eq!(project.sidebar_width(), SIDEBAR_MAX, "a hand-edited file");
+        project.view.sidebar_width = 5;
+        assert_eq!(project.sidebar_width(), SIDEBAR_MIN);
+    }
+
+    #[test]
+    fn the_view_survives_a_round_trip_through_json() {
+        let mut project = Project::new("spm", "/home/x/spm");
+        project.view.sidebar_width = 42;
+        let text = serde_json::to_string(&project).expect("the project serializes");
+        let back: Project = serde_json::from_str(&text).expect("and reads back");
+        assert_eq!(back.sidebar_width(), 42);
     }
 
     #[test]

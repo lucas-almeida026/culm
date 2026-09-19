@@ -652,6 +652,110 @@ fn a_click_on_a_sidebar_row_switches_the_visible_session() {
     assert_eq!(app.focused_entry(), Some(0));
 }
 
+/// The hit box of a project opened at the default width.
+fn sidebar_hit() -> HitBox {
+    HitBox {
+        sidebar_width: 30,
+        separator_col: 29,
+        rows: Vec::new(),
+        panel: Rect::new(30, 0, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 50, 20)),
+        search_row: None,
+        ..HitBox::default()
+    }
+}
+
+/// Drags the separator from its current column to `to`.
+fn drag_separator(app: &mut App, f: &Fakes, hit: &HitBox, to: u16) {
+    let d = f.deps();
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        hit.separator_col,
+        5,
+        hit,
+        &d,
+    );
+    app.on_mouse(MouseEventKind::Drag(MouseButton::Left), to, 5, hit, &d);
+    app.on_mouse(MouseEventKind::Up(MouseButton::Left), to, 5, hit, &d);
+}
+
+#[test]
+fn a_project_opens_at_the_width_it_was_left_at() {
+    let mut saved = project();
+    saved.view.sidebar_width = 45;
+
+    let app = App::new(saved);
+
+    assert_eq!(app.sidebar_width(), 45);
+}
+
+#[test]
+fn a_stored_width_outside_the_limits_opens_clamped() {
+    let mut wide = project();
+    wide.view.sidebar_width = 90;
+    assert_eq!(App::new(wide).sidebar_width(), culm::app::SIDEBAR_MAX);
+
+    let mut narrow = project();
+    narrow.view.sidebar_width = 5;
+    assert_eq!(App::new(narrow).sidebar_width(), culm::app::SIDEBAR_MIN);
+}
+
+#[test]
+fn a_project_with_no_stored_width_opens_at_the_default() {
+    assert_eq!(
+        App::new(project()).sidebar_width(),
+        culm::app::SIDEBAR_DEFAULT
+    );
+}
+
+#[test]
+fn dragging_the_separator_writes_the_width_on_the_next_tick() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    let hit = sidebar_hit();
+
+    drag_separator(&mut app, &f, &hit, 45);
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("tick succeeds");
+
+    assert_eq!(
+        f.store.project("spm").map(|p| p.view.sidebar_width),
+        Some(45),
+        "the width reached the store without a quit"
+    );
+}
+
+#[test]
+fn a_drag_that_ends_where_it_started_writes_nothing() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    let hit = sidebar_hit();
+
+    drag_separator(&mut app, &f, &hit, culm::app::SIDEBAR_DEFAULT);
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("tick succeeds");
+
+    assert_eq!(
+        f.store.saves(),
+        0,
+        "nothing changed, so nothing was written"
+    );
+}
+
+#[test]
+fn the_width_survives_a_quit_and_a_reopen() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    let hit = sidebar_hit();
+    drag_separator(&mut app, &f, &hit, 52);
+    app.shutdown(&f.deps()).expect("shutdown saves");
+
+    let saved = f.store.project("spm").expect("the project was written");
+    let reopened = App::new(saved);
+
+    assert_eq!(reopened.sidebar_width(), 52);
+}
+
 #[test]
 fn dragging_the_separator_resizes_the_sidebar_within_its_limits() {
     let f = Fakes::new();
