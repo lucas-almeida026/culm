@@ -161,6 +161,10 @@ fn run(
             }
         }
 
+        // A quit waits on children culm does not control. The wait runs here, a pass
+        // at a time, so the closing screen keeps drawing instead of freezing.
+        app.poll_close(&deps)?;
+
         // A child that paints its own scrolling repaints after the notch reaches it,
         // so the distance its text moved is measured here, on a later pass.
         app.settle_scroll();

@@ -39,6 +39,17 @@ const SCROLL_MATCH_SHARE: usize = 4;
 /// How long a pause waits for a child to leave before it stops asking.
 const TERMINATE_GRACE: Duration = Duration::from_secs(3);
 
+/// Seconds a quit gives every child, the shell included, to leave on its own. One
+/// grace for all of them rather than one each, so a quit never takes twice as long.
+const CLOSE_GRACE_SECS: u64 = 3;
+
+/// Passes between spinner frames. The loop runs every few milliseconds, so this
+/// lands near a tenth of a second, which is readable.
+const SPINNER_EVERY: u64 = 20;
+
+/// How long the report of a forced quit stays on the bar, in seconds.
+const FORCED_QUIT_NOTICE_SECS: u64 = 5;
+
 /// The side effects the application needs. Passed at the call, never stored, so a
 /// test hands over fakes.
 pub struct Deps<'a> {
@@ -143,6 +154,18 @@ pub struct Selection {
     pub head: (i32, u16),
 }
 
+/// A quit in progress. The loop keeps drawing while the children leave, so the
+/// screen shows what is happening instead of freezing.
+#[derive(Debug, Clone)]
+struct Closing {
+    /// Unix seconds past which a child that has not left is killed.
+    deadline: u64,
+    /// Passes since the quit. This moves the spinner, so it needs no clock.
+    polls: u64,
+    /// True when the user asked twice and the wait was cut short.
+    forced: bool,
+}
+
 /// A wheel notch culm handed to a child, waiting to be measured.
 ///
 /// The child repaints when it pleases, so the distance its text moved is not known
@@ -180,7 +203,7 @@ pub struct App {
     sidebar_width: u16,
     dragging: bool,
     modal: Option<Modal>,
-    status: String,
+    status_text: String,
     hooks_installed: bool,
     /// True when the host terminal reports the keyboard enhancement. The bar shows
     /// which mode is live, because the two paths encode a modified key differently.
@@ -199,6 +222,11 @@ pub struct App {
     selection: Option<Selection>,
     /// A forwarded wheel notch that has not been measured yet.
     pending_scroll: Option<PendingScroll>,
+    /// The quit in progress, if any.
+    closing: Option<Closing>,
+    /// Unix seconds after which the status message stops showing. A message with no
+    /// deadline stays until something replaces it.
+    status_until: Option<u64>,
     /// The last copy. A middle click pastes it, and it survives a focus change so a
     /// copy in one session pastes into another.
     clipboard: String,
@@ -225,7 +253,7 @@ impl App {
             quit: false,
             dragging: false,
             modal: None,
-            status: String::new(),
+            status_text: String::new(),
             hooks_installed: true,
             keyboard_enhanced: false,
             nerd_mode: false,
@@ -236,6 +264,8 @@ impl App {
             dirty: false,
             selection: None,
             pending_scroll: None,
+            closing: None,
+            status_until: None,
             clipboard: String::new(),
             copied: None,
             filter: String::new(),
@@ -268,7 +298,7 @@ impl App {
                         entry.live = Some(session);
                     }
                     Err(e) => {
-                        app.status = format!("{}: {e}", record.name);
+                        app.status_text = format!("{}: {e}", record.name);
                         entry.record.state = SessionState::Paused;
                     }
                 }
@@ -278,6 +308,10 @@ impl App {
         app.reorder();
         app.spawn_shell(deps);
         app.shell_focused = app.shell.is_some();
+        if app.project.forced_quit {
+            app.project.forced_quit = false;
+            app.set_status_for("recovered from forced quit", FORCED_QUIT_NOTICE_SECS);
+        }
         app.save(deps).ok();
         app
     }
@@ -290,7 +324,7 @@ impl App {
             SessionSpec::new("shell", program, &self.project.root).with_size(self.rows, self.cols);
         match Session::spawn(deps.spawner, &spec) {
             Ok(session) => self.shell = Some(session),
-            Err(e) => self.status = format!("shell did not start: {e}"),
+            Err(e) => self.status_text = format!("shell did not start: {e}"),
         }
     }
 
@@ -472,7 +506,46 @@ impl App {
 
     #[must_use]
     pub fn status(&self) -> &str {
-        &self.status
+        match self.status_until {
+            // A timed message retires on its own, so a report of the last run never
+            // sits on the bar for the whole session.
+            Some(until) if self.now > until => "",
+            _ => &self.status_text,
+        }
+    }
+
+    /// Shows a message for a fixed number of seconds.
+    fn set_status_for(&mut self, text: impl Into<String>, secs: u64) {
+        self.status_text = text.into();
+        self.status_until = Some(self.now.saturating_add(secs));
+    }
+
+    /// Shows a message until something replaces it.
+    fn set_status(&mut self, text: impl Into<String>) {
+        self.status_text = text.into();
+        self.status_until = None;
+    }
+
+    fn clear_status(&mut self) {
+        self.status_text.clear();
+        self.status_until = None;
+    }
+
+    /// True while the interface is closing. The loop keeps drawing, and the screen
+    /// shows the spinner rather than the sessions.
+    #[must_use]
+    pub fn closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    /// Which spinner frame the closing screen is on, out of `frames`.
+    #[must_use]
+    pub fn spinner_frame(&self, frames: usize) -> usize {
+        let polls = self.closing.as_ref().map_or(0, |c| c.polls);
+        if frames == 0 {
+            return 0;
+        }
+        usize::try_from(polls / SPINNER_EVERY % frames as u64).unwrap_or(0)
     }
 
     pub fn set_hooks_installed(&mut self, installed: bool) {
@@ -530,11 +603,19 @@ impl App {
     /// session.
     pub fn on_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) -> Result<()> {
         self.now = deps.clock.now_secs();
+        if self.closing.is_some() {
+            // Everything is on its way out. Only a second quit means anything, and
+            // no byte may reach a child that was already asked to leave.
+            if host_action(key) == Some(HostAction::Quit) {
+                self.force_close();
+            }
+            return Ok(());
+        }
         if self.modal.is_some() {
             return self.modal_key(key, deps);
         }
         match host_action(key) {
-            Some(HostAction::Quit) => self.shutdown(deps)?,
+            Some(HostAction::Quit) => self.request_close(deps),
             Some(HostAction::Focus(i)) => {
                 if i < self.active_count() {
                     self.set_focus(i);
@@ -745,10 +826,11 @@ impl App {
 
     fn open_form(&mut self) {
         if self.active_count() >= MAX_ACTIVE {
-            self.status = format!("{MAX_ACTIVE} active sessions is the limit. pause one first.");
+            self.status_text =
+                format!("{MAX_ACTIVE} active sessions is the limit. pause one first.");
             return;
         }
-        self.status.clear();
+        self.clear_status();
         self.selection = None;
         self.modal = Some(Modal::NewSession(NewSession {
             name: String::new(),
@@ -767,14 +849,16 @@ impl App {
             return;
         };
         if entry.live.is_some() {
-            self.status = format!("{} is running. pause it first.", entry.record.name);
+            let name = entry.record.name.clone();
+            self.set_status(format!("{name} is running. pause it first."));
             return;
         }
-        self.status.clear();
+        let name = entry.record.name.clone();
+        self.clear_status();
         self.selection = None;
         self.modal = Some(Modal::ConfirmDelete(ConfirmDelete {
             index,
-            name: entry.record.name.clone(),
+            name,
             answer: Answer::No,
         }));
     }
@@ -808,18 +892,16 @@ impl App {
     /// renames as readily as a running one, because only the record changes.
     fn open_rename(&mut self) {
         let Some(index) = self.focused_entry() else {
-            self.status = "the shell has no name".into();
+            self.status_text = "the shell has no name".into();
             return;
         };
         let Some(entry) = self.entries.get(index) else {
             return;
         };
-        self.status.clear();
+        let name = entry.record.name.clone();
+        self.clear_status();
         self.selection = None;
-        self.modal = Some(Modal::Rename(Rename {
-            index,
-            name: entry.record.name.clone(),
-        }));
+        self.modal = Some(Modal::Rename(Rename { index, name }));
     }
 
     /// Renames a session. The slug, the branch, and every worktree path stay as they
@@ -827,14 +909,14 @@ impl App {
     pub fn rename_session(&mut self, index: usize, name: &str, deps: &Deps<'_>) -> Result<()> {
         let name = name.trim();
         if name.is_empty() {
-            self.status = "a session needs a name".into();
+            self.status_text = "a session needs a name".into();
             return Ok(());
         }
         let Some(entry) = self.entries.get_mut(index) else {
             return Ok(());
         };
         entry.record.name = name.to_string();
-        self.status = format!("renamed to {name}");
+        self.status_text = format!("renamed to {name}");
         self.save(deps)
     }
 
@@ -844,7 +926,7 @@ impl App {
             return Ok(());
         };
         if entry.live.is_some() {
-            self.status = format!("{} is running. pause it first.", entry.record.name);
+            self.status_text = format!("{} is running. pause it first.", entry.record.name);
             return Ok(());
         }
         let record = entry.record.clone();
@@ -853,7 +935,7 @@ impl App {
         if self.entry_focus >= self.entries.len() {
             self.entry_focus = self.entries.len().saturating_sub(1);
         }
-        self.status = if record.repos.is_empty() {
+        self.status_text = if record.repos.is_empty() {
             format!("{} deleted", record.name)
         } else {
             format!("{} deleted. its worktrees are still on disk.", record.name)
@@ -952,12 +1034,13 @@ impl App {
     /// so a half-made session never reaches the list.
     pub fn create_session(&mut self, form: &NewSession, deps: &Deps<'_>) -> Result<()> {
         if self.active_count() >= MAX_ACTIVE {
-            self.status = format!("{MAX_ACTIVE} active sessions is the limit. pause one first.");
+            self.status_text =
+                format!("{MAX_ACTIVE} active sessions is the limit. pause one first.");
             return Ok(());
         }
         let name = form.name.trim();
         if name.is_empty() {
-            self.status = "a session needs a name".into();
+            self.status_text = "a session needs a name".into();
             return Ok(());
         }
         let taken: Vec<String> = self.entries.iter().map(|e| e.record.slug.clone()).collect();
@@ -976,7 +1059,7 @@ impl App {
             };
             let worktree = self.project.worktree_dir(&repo.name, &slug);
             if let Err(e) = deps.git.worktree_add(&repo.path, &worktree, &slug) {
-                self.status = format!("git worktree failed for {}: {e}", repo.name);
+                self.status_text = format!("git worktree failed for {}: {e}", repo.name);
                 return Ok(());
             }
             repos.push(SessionRepo {
@@ -1011,10 +1094,10 @@ impl App {
                 });
                 self.reorder();
                 self.focus_slug_of_last_active();
-                self.status.clear();
+                self.clear_status();
                 self.save(deps)?;
             }
-            Err(e) => self.status = format!("{name} did not start: {e}"),
+            Err(e) => self.status_text = format!("{name} did not start: {e}"),
         }
         Ok(())
     }
@@ -1049,10 +1132,10 @@ impl App {
             entry.record.last_active = now;
             entry.attention = Attention::None;
             entry.rss = 0;
-            self.status = format!("{} paused", record.name);
+            self.status_text = format!("{} paused", record.name);
         } else {
             if self.active_count() >= MAX_ACTIVE {
-                self.status =
+                self.status_text =
                     format!("{MAX_ACTIVE} active sessions is the limit. pause one first.");
                 return Ok(());
             }
@@ -1065,10 +1148,10 @@ impl App {
                     entry.record.state = SessionState::Active;
                     entry.record.last_active = now;
                     entry.live = Some(session);
-                    self.status = format!("{} resumed", record.name);
+                    self.status_text = format!("{} resumed", record.name);
                 }
                 Err(e) => {
-                    self.status = format!("{} did not resume: {e}", record.name);
+                    self.status_text = format!("{} did not resume: {e}", record.name);
                     return Ok(());
                 }
             }
@@ -1144,34 +1227,97 @@ impl App {
 
     /// Ends every child and saves. Active sessions stay active, so the next open
     /// resumes them.
-    pub fn shutdown(&mut self, deps: &Deps<'_>) -> Result<()> {
+    /// Answers `Ctrl+q`. The first press starts the close, a second cuts it short.
+    fn request_close(&mut self, deps: &Deps<'_>) {
+        match self.closing.as_mut() {
+            Some(closing) => closing.forced = true,
+            None => self.begin_close(deps),
+        }
+    }
+
+    /// Asks every child to leave and hands the wait to the loop, so the screen keeps
+    /// drawing instead of freezing for the whole grace period.
+    fn begin_close(&mut self, deps: &Deps<'_>) {
+        self.modal = None;
+        self.selection = None;
         for entry in &mut self.entries {
             if let Some(session) = entry.live.as_mut() {
                 session.terminate().ok();
             }
         }
-        let deadline = Instant::now() + TERMINATE_GRACE;
+        if let Some(shell) = self.shell.as_mut() {
+            shell.terminate().ok();
+        }
+        // One grace for the sessions and the shell together, not one each.
+        self.closing = Some(Closing {
+            deadline: deps.clock.now_secs().saturating_add(CLOSE_GRACE_SECS),
+            polls: 0,
+            forced: false,
+        });
+    }
+
+    /// Carries the close forward by one pass. The loop calls this every time round.
+    ///
+    /// Children that have left are dropped as they go. When the last one is gone, or
+    /// the grace runs out, or the user asked twice, the rest are killed and the state
+    /// is saved.
+    pub fn poll_close(&mut self, deps: &Deps<'_>) -> Result<()> {
+        let Some(mut closing) = self.closing.take() else {
+            return Ok(());
+        };
+        closing.polls = closing.polls.saturating_add(1);
         for entry in &mut self.entries {
-            let Some(session) = entry.live.as_mut() else {
-                continue;
-            };
-            let left = deadline.saturating_duration_since(Instant::now());
-            if !session.wait_for_exit(left) {
-                session.kill().ok();
+            if entry.live.as_mut().is_some_and(Session::has_exited) {
+                entry.live = None;
             }
         }
+        if self.shell.as_mut().is_some_and(Session::has_exited) {
+            self.shell = None;
+        }
+        let waiting = self.entries.iter().any(|e| e.live.is_some()) || self.shell.is_some();
+        let out_of_time = deps.clock.now_secs() > closing.deadline;
+        if waiting && !closing.forced && !out_of_time {
+            self.closing = Some(closing);
+            return Ok(());
+        }
         for entry in &mut self.entries {
+            if let Some(session) = entry.live.as_mut() {
+                session.kill().ok();
+            }
             entry.live = None;
         }
         if let Some(shell) = self.shell.as_mut() {
-            shell.terminate().ok();
-            if !shell.wait_for_exit(TERMINATE_GRACE) {
-                shell.kill().ok();
-            }
+            shell.kill().ok();
         }
         self.shell = None;
+        // Only a quit the user cut short is worth reporting next time.
+        self.project.forced_quit = closing.forced;
+        self.closing = None;
         self.quit = true;
         self.save(deps)
+    }
+
+    /// Closes without handing the wait back to a loop. A caller that owns no loop,
+    /// and every test that wants the end state at once, uses this.
+    pub fn shutdown(&mut self, deps: &Deps<'_>) -> Result<()> {
+        self.begin_close(deps);
+        let deadline = Instant::now() + TERMINATE_GRACE;
+        while !self.quit {
+            self.poll_close(deps)?;
+            if Instant::now() > deadline {
+                // The clock the poll reads is injected and may not move on its own,
+                // so this stops a test from spinning for ever.
+                self.force_close();
+            }
+        }
+        Ok(())
+    }
+
+    /// Cuts the wait short. The children that are left get killed on the next pass.
+    fn force_close(&mut self) {
+        if let Some(closing) = self.closing.as_mut() {
+            closing.forced = true;
+        }
     }
 
     /// Maps a click or a drag onto the sidebar, with no modifier held.
@@ -1317,7 +1463,7 @@ impl App {
             self.selection = None;
             return;
         }
-        self.status = format!("copied {} chars", text.chars().count());
+        self.status_text = format!("copied {} chars", text.chars().count());
         self.clipboard = text.clone();
         self.copied = Some(text);
     }

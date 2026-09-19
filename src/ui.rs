@@ -53,7 +53,40 @@ fn color_of(attention: Attention) -> Color {
     }
 }
 
+/// The spinner frames. Braille dots read as a turning circle at any font size.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The whole screen while the children leave: no sidebar, no panel, no bottom bar.
+///
+/// A quit waits on processes culm does not control, so the wait gets a screen of its
+/// own rather than a frozen copy of the interface.
+fn draw_closing(f: &mut Frame, app: &App) {
+    let area = f.area();
+    f.render_widget(Clear, area);
+    let frame = SPINNER
+        .get(app.spinner_frame(SPINNER.len()))
+        .copied()
+        .unwrap_or(" ");
+    let line = Rect {
+        x: area.x,
+        y: area.y + area.height / 2,
+        width: area.width,
+        height: 1.min(area.height),
+    };
+    f.render_widget(
+        Paragraph::new(format!("{frame} closing"))
+            .centered()
+            .style(Style::default().fg(Color::Cyan)),
+        line,
+    );
+}
+
 pub fn draw(f: &mut Frame, app: &App) -> HitBox {
+    if app.closing() {
+        draw_closing(f, app);
+        // Nothing on this screen answers a click.
+        return HitBox::default();
+    }
     let vertical = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(f.area());
     let (body, status_bar) = (vertical[0], vertical[1]);
     let columns =
@@ -725,6 +758,69 @@ mod tests {
     use crate::app::ConfirmDelete;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// An app part-way through a quit, with children that refuse to leave so the
+    /// closing state stays put while the screen is read.
+    fn closing_app() -> App {
+        use crate::app::Deps;
+        use crate::testing::{FakeClock, FakeGit, FakeSpawner, MemoryStore};
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let spawner = FakeSpawner::new(Vec::new());
+        spawner.children_ignore_terminate();
+        let (git, store, clock) = (
+            FakeGit::default(),
+            MemoryStore::new(),
+            FakeClock::new(1_000),
+        );
+        let deps = Deps {
+            spawner: &spawner,
+            git: &git,
+            store: &store,
+            clock: &clock,
+        };
+        let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
+        app.on_key(
+            &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            &deps,
+        )
+        .expect("the quit starts");
+        assert!(app.closing());
+        app
+    }
+
+    #[test]
+    fn the_closing_screen_centres_its_word_and_shows_nothing_else() {
+        let app = closing_app();
+        let mut terminal = Terminal::new(TestBackend::new(30, 9)).expect("the test backend starts");
+        terminal
+            .draw(|f| {
+                draw(f, &app);
+            })
+            .expect("the screen draws");
+
+        let buffer = terminal.backend().buffer();
+        let row = |y: u16| {
+            (0..30)
+                .filter_map(|x| buffer.cell(Position { x, y }))
+                .map(|cell| cell.symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(row(4).contains("closing"), "row 4 held {:?}", row(4));
+        assert_eq!(row(0).trim(), "", "no sidebar and no panel");
+        assert_eq!(row(8).trim(), "", "no bottom bar");
+    }
+
+    #[test]
+    fn the_spinner_turns_as_the_passes_go_by() {
+        let app = closing_app();
+        let first = app.spinner_frame(SPINNER.len());
+        assert!(first < SPINNER.len());
+        // Every frame is one cell wide, so the word never shifts as it turns.
+        for frame in SPINNER {
+            assert_eq!(frame.chars().count(), 1, "{frame} is one cell");
+        }
+    }
 
     #[test]
     fn a_long_name_is_truncated_with_an_ellipsis() {

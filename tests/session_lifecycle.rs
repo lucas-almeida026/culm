@@ -885,6 +885,143 @@ fn state_is_saved_after_every_mutation() {
     assert!(saved.sessions[0].started, "a resume reloads the transcript");
 }
 
+/// Two sessions, both running, ready to be closed.
+fn two_sessions(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    app
+}
+
+fn press_quit(app: &mut App, f: &Fakes) {
+    app.on_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL), &f.deps())
+        .expect("quit is handled");
+}
+
+#[test]
+fn a_quit_asks_every_child_to_leave_without_blocking() {
+    let f = Fakes::new();
+    let mut app = two_sessions(&f);
+
+    press_quit(&mut app, &f);
+
+    assert!(app.closing(), "the screen shows the closing state");
+    assert!(!app.quit_requested(), "the loop has not been released yet");
+    for spawn in f.spawner.spawns() {
+        assert!(
+            spawn.child.terminated(),
+            "{} was asked to leave",
+            spawn.spec.name
+        );
+    }
+}
+
+#[test]
+fn the_close_ends_once_every_child_is_gone() {
+    let f = Fakes::new();
+    let mut app = two_sessions(&f);
+    press_quit(&mut app, &f);
+
+    app.poll_close(&f.deps()).expect("the close finishes");
+
+    assert!(app.quit_requested());
+    assert!(!app.closing());
+    for spawn in f.spawner.spawns() {
+        assert!(!spawn.child.killed(), "a child that left was never killed");
+    }
+}
+
+#[test]
+fn a_child_that_ignores_the_request_is_killed_once_the_grace_runs_out() {
+    let f = Fakes::new();
+    f.spawner.children_ignore_terminate();
+    let mut app = two_sessions(&f);
+    press_quit(&mut app, &f);
+
+    app.poll_close(&f.deps()).expect("still waiting");
+    assert!(app.closing(), "the grace has not run out yet");
+    for spawn in f.spawner.spawns() {
+        assert!(!spawn.child.killed(), "nothing is killed inside the grace");
+    }
+
+    f.clock.set(1_000 + 4);
+    app.poll_close(&f.deps()).expect("the grace ran out");
+
+    assert!(app.quit_requested());
+    for spawn in f.spawner.spawns() {
+        assert!(spawn.child.killed(), "{} was killed", spawn.spec.name);
+    }
+}
+
+#[test]
+fn a_second_quit_cuts_the_wait_short_and_is_recorded() {
+    let f = Fakes::new();
+    f.spawner.children_ignore_terminate();
+    let mut app = two_sessions(&f);
+    press_quit(&mut app, &f);
+
+    press_quit(&mut app, &f);
+    app.poll_close(&f.deps())
+        .expect("the close finishes at once");
+
+    assert!(app.quit_requested());
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert!(saved.forced_quit, "the next open has something to report");
+}
+
+#[test]
+fn a_close_that_waited_its_turn_records_no_forced_quit() {
+    let f = Fakes::new();
+    let mut app = two_sessions(&f);
+    press_quit(&mut app, &f);
+    app.poll_close(&f.deps()).expect("the close finishes");
+
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert!(!saved.forced_quit);
+}
+
+#[test]
+fn no_key_reaches_a_child_while_the_interface_closes() {
+    let f = Fakes::new();
+    f.spawner.children_ignore_terminate();
+    let mut app = two_sessions(&f);
+    press_quit(&mut app, &f);
+    let pty = f.spawner.spawn_named("two").expect("two spawned").pty;
+    let before = pty.written_utf8();
+
+    app.on_key(&key(KeyCode::Char('x'), KeyModifiers::NONE), &f.deps())
+        .expect("the key is swallowed");
+
+    assert_eq!(pty.written_utf8(), before, "nothing reached the child");
+}
+
+#[test]
+fn a_forced_quit_is_reported_on_the_next_open_and_then_forgotten() {
+    let f = Fakes::new();
+    let mut saved = project();
+    saved.forced_quit = true;
+
+    let mut app = App::open(saved, &f.deps(), 20, 60);
+
+    assert_eq!(app.status(), "recovered from forced quit");
+    let written = f.store.project("spm").expect("the project was saved");
+    assert!(!written.forced_quit, "the report happens once");
+
+    f.clock.set(1_000 + 6);
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("tick succeeds");
+    assert_eq!(app.status(), "", "the report retires on its own");
+}
+
+#[test]
+fn an_ordinary_open_reports_nothing() {
+    let f = Fakes::new();
+    let app = App::open(project(), &f.deps(), 20, 60);
+    assert_eq!(app.status(), "");
+}
+
 #[test]
 fn quitting_leaves_active_sessions_active_so_the_next_open_resumes_them() {
     let f = Fakes::new();
@@ -898,6 +1035,12 @@ fn quitting_leaves_active_sessions_active_so_the_next_open_resumes_them() {
 
     app.on_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL), &f.deps())
         .expect("quit is handled");
+    assert!(
+        !app.quit_requested(),
+        "the quit starts, the loop finishes it"
+    );
+    assert!(app.closing());
+    app.poll_close(&f.deps()).expect("the close finishes");
 
     assert!(app.quit_requested());
     let saved = f.store.project("spm").expect("the project was saved");

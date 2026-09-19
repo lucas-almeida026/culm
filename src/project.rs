@@ -97,6 +97,10 @@ pub struct Project {
     pub sessions: Vec<SessionRecord>,
     #[serde(default)]
     pub view: View,
+    /// True when the last run was forced to quit before its children left. The next
+    /// open reports it and clears it, so the user learns a kill happened.
+    #[serde(default)]
+    pub forced_quit: bool,
 }
 
 impl Project {
@@ -108,6 +112,7 @@ impl Project {
             repos: Vec::new(),
             sessions: Vec::new(),
             view: View::default(),
+            forced_quit: false,
         }
     }
 

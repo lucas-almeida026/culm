@@ -2,7 +2,7 @@
 //! can use them. Nothing here starts a process or touches the file system.
 
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -58,16 +58,19 @@ pub struct FakeChild {
     terminated: Arc<AtomicBool>,
     killed: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
+    /// True when the child ignores a polite request to leave, as a wedged child does.
+    stubborn: Arc<AtomicBool>,
 }
 
 impl FakeChild {
     #[must_use]
-    fn new(pid: u32) -> Self {
+    fn new(pid: u32, stubborn: Arc<AtomicBool>) -> Self {
         Self {
             pid,
             terminated: Arc::new(AtomicBool::new(false)),
             killed: Arc::new(AtomicBool::new(false)),
             exited: Arc::new(AtomicBool::new(false)),
+            stubborn,
         }
     }
 
@@ -95,7 +98,9 @@ impl Child for FakeChild {
 
     fn terminate(&mut self) -> Result<()> {
         self.terminated.store(true, Ordering::Relaxed);
-        self.exited.store(true, Ordering::Relaxed);
+        if !self.stubborn.load(Ordering::Relaxed) {
+            self.exited.store(true, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -124,6 +129,7 @@ pub struct FakeSpawner {
     output: Vec<u8>,
     spawns: Arc<Mutex<Vec<FakeSpawn>>>,
     fail: Arc<AtomicBool>,
+    stubborn: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for FakeSpawner {
@@ -141,7 +147,14 @@ impl FakeSpawner {
             output: output.into(),
             spawns: Arc::new(Mutex::new(Vec::new())),
             fail: Arc::new(AtomicBool::new(false)),
+            stubborn: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Makes every child ignore `terminate`, so a test covers the path where the
+    /// grace runs out and culm has to kill.
+    pub fn children_ignore_terminate(&self) {
+        self.stubborn.store(true, Ordering::Relaxed);
     }
 
     /// Makes every later spawn fail, so a test covers the failure path.
@@ -191,7 +204,10 @@ impl PtySpawner for FakeSpawner {
         let mut guard = lock(&self.spawns);
         let pty = FakePty::default();
         *lock(&pty.size) = (spec.rows, spec.cols);
-        let child = FakeChild::new(1000 + u32::try_from(guard.len()).unwrap_or(0));
+        let child = FakeChild::new(
+            1000 + u32::try_from(guard.len()).unwrap_or(0),
+            Arc::clone(&self.stubborn),
+        );
         guard.push(FakeSpawn {
             spec: spec.clone(),
             pty: pty.clone(),
@@ -199,9 +215,31 @@ impl PtySpawner for FakeSpawner {
         });
         Ok(Spawned {
             pty: Box::new(pty),
-            reader: Box::new(Cursor::new(self.output.clone())),
+            reader: if self.stubborn.load(Ordering::Relaxed) {
+                // A wedged child holds its pseudoterminal open, so no end of file
+                // arrives and `Session::has_exited` stays false until culm kills it.
+                Box::new(Cursor::new(self.output.clone()).chain(NeverEnds))
+            } else {
+                Box::new(Cursor::new(self.output.clone()))
+            },
             child: Box::new(child),
         })
+    }
+}
+
+/// A reader that never reaches the end, standing in for the pseudoterminal of a
+/// child that refuses to leave. It parks its drain thread rather than returning,
+/// and gives up long after any test has finished.
+#[derive(Debug)]
+struct NeverEnds;
+
+impl Read for NeverEnds {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(0)
     }
 }
 
