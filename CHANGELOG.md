@@ -2,6 +2,12 @@
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). `Cargo.toml` holds the version of each commit.
 
+## [Unreleased]
+
+### Added
+
+- **Archive.** `Alt+Shift+A` stops the focused session, active or paused, and moves it to the archive. An archived session has no row in the sidebar, and the paused search does not find it. Archiving takes no recap, whatever `recap-on-pause` says. `Alt+Shift+L` opens the archive list, newest first, with a search box of its own. `Enter` or `Alt+Shift+A` restores the highlighted session to the list it left. A session that was active resumes with `claude --resume <uuid>`. A session that was paused stays paused, with no process. A restore past the limit of nine active sessions is refused, and the session stays archived. When the transcript of a session no longer exists, a restore removes the session from the archive and the list shows the reason. Evidence: the archive tests in `tests/session_lifecycle.rs`, for example `archiving_takes_no_recap_even_when_the_setting_is_on`, `restoring_puts_an_active_session_back_in_the_active_list_and_resumes_it`, and `restoring_a_session_whose_transcript_is_gone_removes_it_and_says_why`. Known gaps: a click does not pick a row in the archive list, and an archived session cannot be deleted until it is restored. culm 0.1.1 refuses to open a project that holds an archived session, with the error `unknown variant 'archived'`. A manual check on 2026-10-10 with the 0.1.1 release binary produced that error.
+
 ## [0.1.1] - 2026-10-10
 
 ### Added
@@ -22,5 +28,6 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 First release. The [release page](https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0) lists the features.
 
+[Unreleased]: https://github.com/lucas-almeida026/culm/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/lucas-almeida026/culm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0

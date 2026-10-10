@@ -197,6 +197,18 @@ struct PendingScroll {
     tries: u32,
 }
 
+/// The archive list. It holds its own search, apart from the paused list's, so the
+/// two never filter each other.
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveList {
+    pub filter: String,
+    /// The highlighted row, counted among the matches of `filter`.
+    pub cursor: usize,
+    /// Why the last restore failed. Shown inside the list, where the user is
+    /// looking, and cleared by the next key.
+    pub notice: Option<String>,
+}
+
 /// The form on top of the panel, if any.
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -208,6 +220,7 @@ pub enum Modal {
     /// The settings that apply to every project. One switch so far, so the cursor
     /// has nowhere else to be and the form holds no data either.
     Settings,
+    Archive(ArchiveList),
 }
 
 #[derive(Debug)]
@@ -494,6 +507,28 @@ impl App {
         self.filter_focused
     }
 
+    /// The archive list, when that is the form on screen.
+    #[must_use]
+    pub fn archive_list(&self) -> Option<&ArchiveList> {
+        match self.modal.as_ref() {
+            Some(Modal::Archive(list)) => Some(list),
+            _ => None,
+        }
+    }
+
+    /// The archived entries whose name holds `filter`, ignoring case, newest first.
+    #[must_use]
+    pub fn archived_matches(&self, filter: &str) -> Vec<usize> {
+        let needle = filter.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.record.is_archived())
+            .filter(|(_, entry)| needle.is_empty() || entry.name().to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// The paused entries the filter admits, in list order.
     ///
     /// The interface and the search box both read this, so what `Enter` lands on is
@@ -504,7 +539,7 @@ impl App {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.is_active())
+            .filter(|(_, entry)| entry.record.is_paused())
             .filter(|(_, entry)| needle.is_empty() || entry.name().to_lowercase().contains(&needle))
             .map(|(index, _)| index)
             .collect()
@@ -672,6 +707,8 @@ impl App {
             Some(HostAction::RenameSession) => self.open_rename(),
             Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
             Some(HostAction::ShowSettings) => self.modal = Some(Modal::Settings),
+            Some(HostAction::ToggleArchive) => self.archive_focused(deps)?,
+            Some(HostAction::ShowArchive) => self.open_archive(),
             Some(HostAction::FindSession) => {
                 self.filter_focused = !self.filter_focused;
                 self.selection = None;
@@ -709,6 +746,11 @@ impl App {
             Some(Modal::ConfirmDelete(_) | Modal::Help | Modal::Settings) => return Ok(()),
             Some(Modal::Rename(rename)) => {
                 rename.name.push_str(text);
+                return Ok(());
+            }
+            Some(Modal::Archive(list)) => {
+                list.filter.push_str(text);
+                list.cursor = 0;
                 return Ok(());
             }
             None => {}
@@ -1035,6 +1077,7 @@ impl App {
                 }
                 return Ok(());
             }
+            Some(Modal::Archive(_)) => return self.archive_key(key, deps),
             Some(Modal::Help) => {
                 // The help changes nothing, so any key that dismisses a dialog
                 // dismisses it, and no other key reaches a child.
@@ -1149,6 +1192,7 @@ impl App {
             last_input: 0,
             recap: None,
             recap_at: 0,
+            archived_from: None,
         };
 
         match self.start(&record, deps) {
@@ -1174,6 +1218,219 @@ impl App {
         if let Some(i) = self.entries.iter().rposition(Entry::is_active) {
             self.entry_focus = i;
         }
+    }
+
+    /// Opens the archive list with an empty search.
+    fn open_archive(&mut self) {
+        self.clear_status();
+        self.selection = None;
+        self.filter_focused = false;
+        self.modal = Some(Modal::Archive(ArchiveList::default()));
+    }
+
+    /// Feeds the archive list. Typing searches, the arrows move the highlight, and
+    /// `Enter` or the archive binding restores the highlighted session.
+    fn archive_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) -> Result<()> {
+        use ratatui::crossterm::event::KeyCode;
+        match host_action(key) {
+            Some(HostAction::ShowArchive) => {
+                self.modal = None;
+                return Ok(());
+            }
+            Some(HostAction::ToggleArchive) => return self.restore_highlighted(deps),
+            _ => {}
+        }
+        let Some(Modal::Archive(list)) = self.modal.as_mut() else {
+            return Ok(());
+        };
+        list.notice = None;
+        match key.code {
+            KeyCode::Esc => self.modal = None,
+            KeyCode::Enter => return self.restore_highlighted(deps),
+            KeyCode::Up => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Down => list.cursor = list.cursor.saturating_add(1),
+            KeyCode::Backspace => {
+                list.filter.pop();
+                list.cursor = 0;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                list.filter.push(c);
+                list.cursor = 0;
+            }
+            _ => {}
+        }
+        self.clamp_archive_cursor();
+        Ok(())
+    }
+
+    /// Holds the highlight on a row that exists, after the matches changed.
+    fn clamp_archive_cursor(&mut self) {
+        let Some(Modal::Archive(list)) = self.modal.as_ref() else {
+            return;
+        };
+        let last = self.archived_matches(&list.filter).len().saturating_sub(1);
+        if let Some(Modal::Archive(list)) = self.modal.as_mut() {
+            list.cursor = list.cursor.min(last);
+        }
+    }
+
+    fn restore_highlighted(&mut self, deps: &Deps<'_>) -> Result<()> {
+        let Some(list) = self.archive_list() else {
+            return Ok(());
+        };
+        let Some(&index) = self.archived_matches(&list.filter).get(list.cursor) else {
+            return Ok(());
+        };
+        self.restore_archived(index, deps)
+    }
+
+    /// Moves the focused session to the archive. A running session is stopped as a
+    /// pause stops it, but no recap is taken, whatever the setting says.
+    pub fn archive_focused(&mut self, deps: &Deps<'_>) -> Result<()> {
+        if self.shell_focused {
+            self.set_status("the shell cannot be archived");
+            return Ok(());
+        }
+        let index = self.entry_focus;
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Ok(());
+        };
+        if entry.record.is_archived() {
+            return Ok(());
+        }
+        if let Some(mut session) = entry.live.take() {
+            session.terminate().ok();
+            session.wait_for_exit(TERMINATE_GRACE);
+        }
+        entry.record.archived_from = Some(entry.record.state);
+        entry.record.state = SessionState::Archived;
+        entry.record.last_active = deps.clock.now_secs();
+        entry.attention = Attention::None;
+        entry.rss = 0;
+        let name = entry.record.name.clone();
+        self.selection = None;
+        self.reorder();
+        self.focus_neighbor_of(index);
+        self.set_status(format!("{name} archived. Alt+Shift+L lists the archive."));
+        self.save(deps)
+    }
+
+    /// Focuses the row that took the place of one that left the sidebar, or the row
+    /// above it when it was the last, or the shell when no row is left.
+    fn focus_neighbor_of(&mut self, index: usize) {
+        // `reorder` keeps every archived entry after the rest, so the rows the
+        // sidebar shows are exactly the first `shown` entries.
+        let shown = self
+            .entries
+            .iter()
+            .filter(|e| !e.record.is_archived())
+            .count();
+        if shown == 0 {
+            self.focus_shell();
+        } else {
+            self.set_focus(index.min(shown - 1));
+        }
+    }
+
+    /// Returns an archived session to the list it left: active sessions start
+    /// again, paused sessions stay without a process.
+    ///
+    /// A session whose transcript is gone cannot be resumed, so it leaves the
+    /// archive instead, and the list says why.
+    pub fn restore_archived(&mut self, index: usize, deps: &Deps<'_>) -> Result<()> {
+        let Some(entry) = self.entries.get(index) else {
+            return Ok(());
+        };
+        if !entry.record.is_archived() {
+            return Ok(());
+        }
+        let record = entry.record.clone();
+        if !self.has_transcript(&record, deps) {
+            return self.drop_lost_archive(index, &record, deps);
+        }
+        let target = record.restore_state();
+        if target == SessionState::Active && self.active_count() >= MAX_ACTIVE {
+            self.archive_notice(format!(
+                "{MAX_ACTIVE} active sessions is the limit. pause one, then restore {}.",
+                record.name
+            ));
+            return Ok(());
+        }
+        let started = if target == SessionState::Active {
+            Some(self.start(&record, deps))
+        } else {
+            None
+        };
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Ok(());
+        };
+        entry.record.archived_from = None;
+        entry.record.last_active = deps.clock.now_secs();
+        let status = match started {
+            Some(Ok(session)) => {
+                entry.record.started = true;
+                entry.record.state = SessionState::Active;
+                entry.live = Some(session);
+                format!("{} restored to the active list", record.name)
+            }
+            // The session is out of the archive either way. A start that failed
+            // leaves it paused, as a failed start does when a project opens.
+            Some(Err(e)) => {
+                entry.record.state = SessionState::Paused;
+                format!("{} restored as paused. it did not start: {e}", record.name)
+            }
+            None => {
+                entry.record.state = SessionState::Paused;
+                format!("{} restored to the paused list", record.name)
+            }
+        };
+        self.modal = None;
+        self.reorder();
+        self.focus_id(&record.id);
+        self.shell_focused = false;
+        self.selection = None;
+        self.set_status(status);
+        self.save(deps)
+    }
+
+    /// Removes an archived session whose transcript no longer exists, and says so.
+    fn drop_lost_archive(
+        &mut self,
+        index: usize,
+        record: &SessionRecord,
+        deps: &Deps<'_>,
+    ) -> Result<()> {
+        let focused = self
+            .entries
+            .get(self.entry_focus)
+            .map(|e| e.record.id.clone());
+        self.entries.remove(index);
+        if let Some(id) = focused {
+            self.focus_id(&id);
+        }
+        if self.entry_focus >= self.entries.len() {
+            self.entry_focus = self.entries.len().saturating_sub(1);
+        }
+        let mut text = format!(
+            "{} could not be restored: its conversation no longer exists, \
+             so it was removed from the archive.",
+            record.name
+        );
+        if !record.repos.is_empty() {
+            text.push_str(" its worktrees are still on disk.");
+        }
+        self.archive_notice(text);
+        self.clamp_archive_cursor();
+        self.save(deps)
+    }
+
+    /// Reports a failed restore inside the archive list, and on the bar as well, so
+    /// the message survives the list being closed.
+    fn archive_notice(&mut self, text: String) {
+        if let Some(Modal::Archive(list)) = self.modal.as_mut() {
+            list.notice = Some(text.clone());
+        }
+        self.set_status(text);
     }
 
     /// Pauses the focused session, or resumes it when it is already paused.
@@ -1644,7 +1901,8 @@ impl App {
         Ok(())
     }
 
-    /// Active sessions first, paused sessions after, each half in its own order.
+    /// Active sessions first, paused sessions next, archived sessions last, each part
+    /// in its own order.
     fn reorder(&mut self) {
         let focused = self
             .entries
@@ -1652,18 +1910,21 @@ impl App {
             .map(|e| e.record.id.clone());
         let mut active: Vec<Entry> = Vec::new();
         let mut paused: Vec<Entry> = Vec::new();
+        let mut archived: Vec<Entry> = Vec::new();
         for entry in self.entries.drain(..) {
-            if entry.is_active() {
-                active.push(entry);
-            } else {
-                paused.push(entry);
+            match entry.record.state {
+                SessionState::Active => active.push(entry),
+                SessionState::Paused => paused.push(entry),
+                SessionState::Archived => archived.push(entry),
             }
         }
-        // The active half keeps its order, because a digit addresses it. The paused
-        // half is ordered by last use, newest first, and the sort is stable, so two
+        // The active part keeps its order, because a digit addresses it. The other
+        // two are ordered by last use, newest first, and the sort is stable, so two
         // sessions of the same age keep the order they were added in.
         paused.sort_by(|a, b| b.record.last_active.cmp(&a.record.last_active));
+        archived.sort_by(|a, b| b.record.last_active.cmp(&a.record.last_active));
         active.append(&mut paused);
+        active.append(&mut archived);
         self.entries = active;
         if let Some(id) = focused {
             self.focus_id(&id);

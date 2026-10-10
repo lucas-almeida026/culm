@@ -425,6 +425,7 @@ pub fn import_sessions(
                 last_input: 0,
                 recap: None,
                 recap_at: 0,
+                archived_from: None,
             });
             report.imported += 1;
         }

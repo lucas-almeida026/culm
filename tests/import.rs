@@ -247,6 +247,7 @@ fn an_active_session_is_never_imported_twice() {
         last_input: 0,
         recap: None,
         recap_at: 0,
+        archived_from: None,
     });
     f.store.put_transcript(
         ROOT_DIR,

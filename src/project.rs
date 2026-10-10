@@ -44,12 +44,15 @@ pub struct Repository {
     pub path: PathBuf,
 }
 
-/// Whether a session holds a running process.
+/// Which list a session sits in. Only an active session holds a running process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionState {
     Active,
     Paused,
+    /// Out of the sidebar and out of the paused search. Only the archive list shows
+    /// it, and `archived_from` says which list a restore returns it to.
+    Archived,
 }
 
 /// One repository that a session edits, and the worktree it edits it through.
@@ -90,12 +93,36 @@ pub struct SessionRecord {
     /// this had no interaction to summarise, so it costs no call to the model.
     #[serde(default)]
     pub recap_at: u64,
+    /// The list an archived session left, so a restore puts it back there. `None`
+    /// for a session that is not archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_from: Option<SessionState>,
 }
 
 impl SessionRecord {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.state == SessionState::Active
+    }
+
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.state == SessionState::Paused
+    }
+
+    #[must_use]
+    pub fn is_archived(&self) -> bool {
+        self.state == SessionState::Archived
+    }
+
+    /// The list a restore returns this session to. A record that lost the field,
+    /// by a hand edit, goes back paused, because that starts no process.
+    #[must_use]
+    pub fn restore_state(&self) -> SessionState {
+        match self.archived_from {
+            Some(SessionState::Active) => SessionState::Active,
+            _ => SessionState::Paused,
+        }
     }
 }
 
@@ -495,6 +522,7 @@ mod tests {
             last_input: 0,
             recap: None,
             recap_at: 0,
+            archived_from: None,
         }];
         project
     }
@@ -594,6 +622,36 @@ mod tests {
         let text = serde_json::to_string(&project).expect("the project serializes");
         let back: Project = serde_json::from_str(&text).expect("and reads back");
         assert_eq!(back.sidebar_width(), 42);
+    }
+
+    #[test]
+    fn an_archived_session_survives_a_round_trip_through_json() {
+        let mut project = project_with_a_session();
+        project.sessions[0].state = SessionState::Archived;
+        project.sessions[0].archived_from = Some(SessionState::Active);
+        let text = serde_json::to_string(&project).expect("the project serializes");
+        let back: Project = serde_json::from_str(&text).expect("and reads back");
+        assert_eq!(back.sessions[0].state, SessionState::Archived);
+        assert_eq!(back.sessions[0].restore_state(), SessionState::Active);
+    }
+
+    #[test]
+    fn a_session_that_is_not_archived_writes_no_archived_from() {
+        let project = project_with_a_session();
+        let text = serde_json::to_string(&project).expect("the project serializes");
+        assert!(!text.contains("archived_from"), "{text}");
+    }
+
+    #[test]
+    fn an_archived_session_that_lost_its_origin_restores_as_paused() {
+        let mut record = project_with_a_session().sessions.remove(0);
+        record.state = SessionState::Archived;
+        record.archived_from = None;
+        assert_eq!(
+            record.restore_state(),
+            SessionState::Paused,
+            "a hand-edited file never starts a process on its own"
+        );
     }
 
     #[test]

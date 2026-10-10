@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{Answer, App, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
+use crate::app::{Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -110,6 +110,7 @@ pub fn draw(f: &mut Frame, app: &App) -> HitBox {
         Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
         Some(Modal::Help) => draw_help(f, panel),
         Some(Modal::Settings) => draw_settings(f, app, panel),
+        Some(Modal::Archive(list)) => draw_archive(f, app, list, panel),
         None => {}
     }
 
@@ -463,7 +464,7 @@ const WARN_LONG: &str = "markers off, run: culm hooks install";
 const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
-const SHORTCUTS: [(&str, &str); 16] = [
+const SHORTCUTS: [(&str, &str); 18] = [
     ("Alt+0", "focus the shell at position 0"),
     ("Alt+1 to Alt+9", "focus an active session"),
     ("Alt+Shift+N", "create a session"),
@@ -471,6 +472,8 @@ const SHORTCUTS: [(&str, &str); 16] = [
     ("Alt+Shift+R", "rename the focused session"),
     ("Alt+Shift+F", "search the paused list"),
     ("Alt+Shift+X", "delete the focused paused session"),
+    ("Alt+Shift+A", "archive the focused session"),
+    ("Alt+Shift+L", "list the archive, and restore from it"),
     ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
     ("Alt+Shift+H", "this table"),
     ("Alt+Shift+S", "settings for every project"),
@@ -514,6 +517,127 @@ fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
         Paragraph::new(lines).block(Block::bordered().title(" settings ")),
         area,
     );
+}
+
+/// The archive list: its own search box, the archived sessions newest first, and
+/// the reason the last restore failed, if one did.
+fn draw_archive(f: &mut Frame, app: &App, list: &ArchiveList, panel: Rect) {
+    let width = 64.min(panel.width.saturating_sub(2));
+    let inner_width = usize::from(width.saturating_sub(2));
+    let matches = app.archived_matches(&list.filter);
+    let notice = list
+        .notice
+        .as_deref()
+        .map(|text| wrap(text, inner_width.saturating_sub(1)));
+    let notice_rows = notice.as_ref().map_or(0, |lines| lines.len() + 1);
+    // The border, the search row, a gap, a gap, and the hint.
+    let fixed = 6 + notice_rows;
+    let room = usize::from(panel.height).saturating_sub(fixed).max(1);
+    let shown = matches.len().clamp(1, room);
+    let height = u16::try_from(fixed + shown)
+        .unwrap_or(u16::MAX)
+        .min(panel.height);
+    let area = Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let search = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let text = format!(" / {}", list.filter);
+    let pad = inner_width.saturating_sub(text.chars().count());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(text, search),
+            Span::styled(" ".repeat(pad), search),
+        ]),
+        Line::from(""),
+    ];
+    if matches.is_empty() {
+        lines.push(dim(if list.filter.is_empty() {
+            "  no archived session"
+        } else {
+            "  no match"
+        }));
+    }
+    // The window follows the highlight, so a long archive scrolls under it.
+    let first = list.cursor.saturating_sub(shown.saturating_sub(1));
+    for (offset, &index) in matches.iter().enumerate().skip(first).take(shown) {
+        let Some(entry) = app.entries().get(index) else {
+            continue;
+        };
+        lines.push(archive_line(entry, offset == list.cursor, inner_width));
+    }
+    lines.push(Line::from(""));
+    if let Some(notice) = notice {
+        for text in notice {
+            lines.push(Line::from(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(dim(" type to search   Enter restores   Esc closes"));
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" archive ")),
+        area,
+    );
+}
+
+/// One archived session, and the list a restore returns it to.
+fn archive_line(entry: &Entry, highlighted: bool, inner_width: usize) -> Line<'static> {
+    let base = if highlighted {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let back_to = match entry.record.restore_state() {
+        crate::project::SessionState::Active => "to active ",
+        _ => "to paused ",
+    };
+    let room = inner_width.saturating_sub(back_to.len() + 2);
+    let name = truncate(entry.name(), room);
+    let pad = room.saturating_sub(name.chars().count());
+    Line::from(vec![
+        Span::styled(format!("  {name}"), base),
+        Span::styled(" ".repeat(pad), base),
+        Span::styled(
+            back_to,
+            if highlighted {
+                base
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+    ])
+}
+
+/// Breaks text into lines of at most `width` characters, at spaces where it can.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let needed = if line.is_empty() {
+            word.chars().count()
+        } else {
+            line.chars().count() + 1 + word.chars().count()
+        };
+        if needed > width && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn draw_help(f: &mut Frame, panel: Rect) {
@@ -865,6 +989,62 @@ mod tests {
         assert!(row(4).contains("closing"), "row 4 held {:?}", row(4));
         assert_eq!(row(0).trim(), "", "no sidebar and no panel");
         assert_eq!(row(8).trim(), "", "no bottom bar");
+    }
+
+    #[test]
+    fn the_archive_list_shows_the_reason_a_restore_failed() {
+        use crate::app::Deps;
+        use crate::testing::{FakeClock, FakeGit, FakeRecapper, FakeSpawner, MemoryStore};
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let spawner = FakeSpawner::new(Vec::new());
+        let (git, store, clock) = (
+            FakeGit::default(),
+            MemoryStore::new(),
+            FakeClock::new(1_000),
+        );
+        let recapper = FakeRecapper::new();
+        let deps = Deps {
+            spawner: &spawner,
+            git: &git,
+            store: &store,
+            clock: &clock,
+            recapper: &recapper,
+        };
+        let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
+        let form = crate::app::NewSession {
+            name: "lost".into(),
+            chosen: Vec::new(),
+            field: Field::Name,
+        };
+        app.create_session(&form, &deps).expect("lost starts");
+        app.archive_focused(&deps).expect("lost is archived");
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        app.on_key(&KeyEvent::new(KeyCode::Char('L'), alt_shift), &deps)
+            .expect("the list opens");
+        app.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &deps)
+            .expect("the restore is tried");
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 24)).expect("the test backend starts");
+        terminal
+            .draw(|f| {
+                draw(f, &app);
+            })
+            .expect("the screen draws");
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..100)
+                    .filter_map(|x| buffer.cell(Position { x, y }))
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains(" archive "), "{screen}");
+        assert!(screen.contains("lost could not be restored"), "{screen}");
+        assert!(screen.contains("no archived session"), "{screen}");
     }
 
     #[test]

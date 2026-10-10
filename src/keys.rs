@@ -24,6 +24,8 @@ pub enum HostAction {
     ScrollUp,
     ScrollDown,
     NerdMode,
+    ToggleArchive,
+    ShowArchive,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -68,6 +70,10 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('s') if shift => Some(HostAction::ShowSettings),
         KeyCode::Char('D') => Some(HostAction::NerdMode),
         KeyCode::Char('d') if shift => Some(HostAction::NerdMode),
+        KeyCode::Char('A') => Some(HostAction::ToggleArchive),
+        KeyCode::Char('a') if shift => Some(HostAction::ToggleArchive),
+        KeyCode::Char('L') => Some(HostAction::ShowArchive),
+        KeyCode::Char('l') if shift => Some(HostAction::ShowArchive),
         _ => None,
     }
 }
@@ -536,6 +542,40 @@ mod tests {
                 "ctrl+end is not plain end"
             );
         }
+    }
+
+    #[test]
+    fn alt_shift_a_archives_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('A'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::ToggleArchive));
+        assert_eq!(kitty, Some(HostAction::ToggleArchive));
+    }
+
+    #[test]
+    fn alt_shift_l_lists_the_archive_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('L'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('l'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::ShowArchive));
+        assert_eq!(kitty, Some(HostAction::ShowArchive));
+    }
+
+    #[test]
+    fn bare_alt_a_and_alt_l_still_belong_to_the_child() {
+        assert_eq!(
+            host_action(&key(KeyCode::Char('a'), KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('l'), KeyModifiers::ALT)),
+            None
+        );
     }
 
     #[test]

@@ -56,6 +56,7 @@ fn record(name: &str, state: SessionState) -> SessionRecord {
         last_input: 0,
         recap: None,
         recap_at: 0,
+        archived_from: None,
     }
 }
 
@@ -1790,6 +1791,7 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         last_input: 0,
         recap: None,
         recap_at: 0,
+        archived_from: None,
     }];
     f.store.put_project(&project);
     f.store.put_claude_dirs([
@@ -3152,4 +3154,350 @@ fn the_shortcut_table_opens_over_the_shell_as_well() {
         .expect("the table opens");
 
     assert!(app.help_open());
+}
+
+fn alt_shift(c: char) -> KeyEvent {
+    key(KeyCode::Char(c), KeyModifiers::ALT | KeyModifiers::SHIFT)
+}
+
+/// Writes a transcript for a session, so a restore finds its conversation.
+fn keep_transcript(f: &Fakes, app: &App, name: &str) {
+    let entry = app
+        .entries()
+        .iter()
+        .find(|e| e.name() == name)
+        .expect("the session exists");
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(&entry.record.cwd),
+        &entry.record.id,
+        0,
+        "",
+    );
+}
+
+fn entry_named<'a>(app: &'a App, name: &str) -> &'a culm::app::Entry {
+    app.entries()
+        .iter()
+        .find(|e| e.name() == name)
+        .expect("the session exists")
+}
+
+fn focus_named(app: &mut App, name: &str) {
+    let index = app
+        .entries()
+        .iter()
+        .position(|e| e.name() == name)
+        .expect("the session exists");
+    app.set_focus(index);
+}
+
+fn press(app: &mut App, f: &Fakes, k: KeyEvent) {
+    app.on_key(&k, &f.deps()).expect("the key is handled");
+}
+
+fn type_text(app: &mut App, f: &Fakes, text: &str) {
+    for c in text.chars() {
+        press(app, f, key(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+}
+
+#[test]
+fn archiving_an_active_session_stops_it_and_takes_it_out_of_the_sidebar() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    focus_named(&mut app, "one");
+
+    press(&mut app, &f, alt_shift('A'));
+
+    let one = entry_named(&app, "one");
+    assert!(one.live.is_none(), "an archived session holds no process");
+    assert_eq!(one.record.state, SessionState::Archived);
+    assert_eq!(one.record.archived_from, Some(SessionState::Active));
+    assert!(
+        f.spawner
+            .spawn_named("one")
+            .expect("one was spawned")
+            .child
+            .terminated()
+    );
+    assert_eq!(app.active_count(), 1);
+    assert!(
+        app.paused_matches().is_empty(),
+        "nor is it in the paused list"
+    );
+    assert_eq!(
+        app.focused_entry()
+            .map(|i| app.entries()[i].name().to_string()),
+        Some("two".to_string()),
+        "the focus moves to the row that took its place"
+    );
+}
+
+#[test]
+fn archiving_takes_no_recap_even_when_the_setting_is_on() {
+    let f = Fakes::new();
+    let mut app = session_with_transcript(&f);
+    press(&mut app, &f, key(KeyCode::Char('x'), KeyModifiers::NONE));
+
+    app.archive_focused(&f.deps()).expect("one is archived");
+    app.poll_recap(&f.deps());
+
+    assert!(f.recapper.asked().is_empty(), "the model was never called");
+    assert_eq!(recap_of(&app), None);
+}
+
+#[test]
+fn a_paused_session_can_be_archived_and_leaves_the_paused_list() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.toggle_pause(&f.deps()).expect("one pauses");
+
+    app.archive_focused(&f.deps()).expect("one is archived");
+
+    assert_eq!(
+        entry_named(&app, "one").record.archived_from,
+        Some(SessionState::Paused)
+    );
+    assert!(app.paused_matches().is_empty());
+    assert_eq!(
+        app.focus(),
+        Focus::Shell,
+        "no row is left, so the shell holds it"
+    );
+}
+
+#[test]
+fn the_shell_cannot_be_archived() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.focus_shell();
+
+    press(&mut app, &f, alt_shift('A'));
+
+    assert!(app.status().contains("shell"));
+    assert_eq!(entry_named(&app, "one").record.state, SessionState::Active);
+}
+
+#[test]
+fn restoring_puts_an_active_session_back_in_the_active_list_and_resumes_it() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    keep_transcript(&f, &app, "one");
+    app.archive_focused(&f.deps()).expect("one is archived");
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    let one = entry_named(&app, "one");
+    assert_eq!(one.record.state, SessionState::Active);
+    assert_eq!(one.record.archived_from, None);
+    assert!(one.live.is_some(), "the session runs again");
+    let last = session_specs(&f).pop().expect("a session was spawned");
+    assert_eq!(
+        &last.args[..2],
+        ["--resume".to_string(), one.record.id.clone()],
+        "the restore resumes the same conversation"
+    );
+    assert!(app.modal().is_none(), "the list closes on a restore");
+    assert_eq!(app.focus(), Focus::Entry(0));
+}
+
+#[test]
+fn restoring_puts_a_paused_session_back_in_the_paused_list_without_a_process() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    keep_transcript(&f, &app, "one");
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    app.archive_focused(&f.deps()).expect("one is archived");
+    let spawned = f.spawner.count();
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, alt_shift('A'));
+
+    let one = entry_named(&app, "one");
+    assert_eq!(one.record.state, SessionState::Paused);
+    assert!(one.live.is_none());
+    assert_eq!(
+        f.spawner.count(),
+        spawned,
+        "a paused restore starts nothing"
+    );
+    assert_eq!(app.paused_matches().len(), 1);
+}
+
+#[test]
+fn restoring_a_session_whose_transcript_is_gone_removes_it_and_says_why() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.archive_focused(&f.deps()).expect("one is archived");
+    let spawned = f.spawner.count();
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app.entries().is_empty(), "the session leaves the archive");
+    let notice = app
+        .archive_list()
+        .and_then(|list| list.notice.clone())
+        .expect("the list stays open and says why");
+    assert!(notice.contains("one could not be restored"), "{notice}");
+    assert!(notice.contains("no longer exists"), "{notice}");
+    assert_eq!(f.spawner.count(), spawned, "nothing was started");
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert!(saved.sessions.is_empty(), "the removal is saved");
+}
+
+#[test]
+fn restoring_past_the_active_limit_is_refused_and_keeps_the_session_archived() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("old", [false, false]), &f.deps())
+        .expect("old starts");
+    keep_transcript(&f, &app, "old");
+    app.archive_focused(&f.deps()).expect("old is archived");
+    for n in 1..=9 {
+        app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
+            .expect("a session starts");
+    }
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        entry_named(&app, "old").record.state,
+        SessionState::Archived
+    );
+    let notice = app
+        .archive_list()
+        .and_then(|list| list.notice.clone())
+        .expect("the list says why");
+    assert!(notice.contains("limit"), "{notice}");
+}
+
+#[test]
+fn the_archive_search_reads_only_archived_sessions() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    for name in ["alpha", "beta", "alphabet"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("a session starts");
+    }
+    for name in ["alpha", "beta"] {
+        focus_named(&mut app, name);
+        app.archive_focused(&f.deps()).expect("archived");
+    }
+    focus_named(&mut app, "alphabet");
+    app.toggle_pause(&f.deps()).expect("alphabet pauses");
+
+    press(&mut app, &f, alt_shift('L'));
+    type_text(&mut app, &f, "ALP");
+
+    let filter = app.archive_list().expect("the list is open").filter.clone();
+    let found: Vec<&str> = app
+        .archived_matches(&filter)
+        .into_iter()
+        .map(|i| app.entries()[i].name())
+        .collect();
+    assert_eq!(found, ["alpha"], "a paused match is not an archived one");
+    assert_eq!(app.filter(), "", "the paused search is left alone");
+    let paused: Vec<&str> = app
+        .paused_matches()
+        .into_iter()
+        .map(|i| app.entries()[i].name())
+        .collect();
+    assert_eq!(
+        paused,
+        ["alphabet"],
+        "and it never lists an archived session"
+    );
+}
+
+#[test]
+fn the_arrows_pick_which_archived_session_is_restored() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    for name in ["first", "second"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("a session starts");
+        keep_transcript(&f, &app, name);
+    }
+    focus_named(&mut app, "first");
+    app.archive_focused(&f.deps()).expect("first is archived");
+    f.clock.set(2_000);
+    focus_named(&mut app, "second");
+    app.archive_focused(&f.deps()).expect("second is archived");
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        entry_named(&app, "first").record.state,
+        SessionState::Active,
+        "the newest archive is listed first, so one step down is the older one"
+    );
+    assert_eq!(
+        entry_named(&app, "second").record.state,
+        SessionState::Archived
+    );
+}
+
+#[test]
+fn no_key_reaches_a_child_while_the_archive_is_open() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    press(&mut app, &f, alt_shift('L'));
+    type_text(&mut app, &f, "hello");
+    press(&mut app, &f, key(KeyCode::Esc, KeyModifiers::NONE));
+
+    let pty = f.spawner.spawn_named("one").expect("one exists").pty;
+    assert_eq!(pty.written_utf8(), "", "no key reached the child");
+    assert!(app.modal().is_none(), "Esc closes the list");
+}
+
+#[test]
+fn the_archive_binding_closes_the_list_again() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+
+    press(&mut app, &f, alt_shift('L'));
+    assert!(app.archive_list().is_some());
+    press(&mut app, &f, alt_shift('L'));
+    assert!(app.modal().is_none());
+}
+
+#[test]
+fn an_archived_session_stays_archived_across_a_reopen_and_starts_no_process() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.archive_focused(&f.deps()).expect("one is archived");
+    app.shutdown(&f.deps()).expect("the app closes");
+
+    let saved = f.store.project("spm").expect("the project was saved");
+    let before = session_specs(&f).len();
+    let app = App::open(saved, &f.deps(), 20, 60);
+
+    let one = entry_named(&app, "one");
+    assert_eq!(one.record.state, SessionState::Archived);
+    assert_eq!(one.record.archived_from, Some(SessionState::Active));
+    assert_eq!(session_specs(&f).len(), before, "no session was started");
 }

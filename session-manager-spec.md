@@ -17,6 +17,7 @@ Run many Claude Code sessions at the same time, one per feature. Group the sessi
 | Session | One Claude Code process, with one transcript, one name, one session id, and one attention state. |
 | Active session | A session whose process runs. |
 | Paused session | A session with no process. culm holds the session id and starts the session on demand. |
+| Archived session | A session with no process and no row in the sidebar. culm holds the session id and the list that the session left. |
 | Worktree | A git worktree plus a branch, created for one session in one repository. |
 | Shell | A plain terminal at position 0. Not a Claude Code session. It carries no session id, no transcript, and no attention marker, and culm never saves it. |
 | Registry | One global file that lists every project. |
@@ -113,8 +114,8 @@ Run many Claude Code sessions at the same time, one per feature. Group the sessi
 
 ### Session state
 
-44. Give every session one of two states: active or paused.
-45. Split the session list into two halves. The first half holds active sessions. The second half holds paused sessions.
+44. Give every session one of three states: active, paused, or archived.
+45. Split the sidebar list into two halves. The first half holds active sessions. The second half holds paused sessions. The sidebar shows no archived session.
 46. Start every active session when the project opens.
 47. Start a paused session when the user focuses the row and asks for the resume. Start no process before that.
 48. Focus a row on a click. A click alone never starts a process.
@@ -260,6 +261,19 @@ One Claude Code process measured about 436 MB of resident memory on 2026-09-02. 
 144. Give a recap forty-five seconds and then abandon it. Keep one plain message whenever a recap could not be had, whatever the reason, because the reason is never the user's problem.
 145. Show the recap in the panel of a paused session, above the text that says it is paused.
 
+### Archive
+
+146. Archive the focused session with `Alt+Shift+A`, active or paused. Stop an active session with SIGTERM, as a pause does.
+147. Take no recap when a session is archived, whatever `recap-on-pause` says.
+148. Record the state that a session held before the archive. A restore returns the session to that list.
+149. Keep an archived session out of the sidebar and out of the paused search.
+150. Refuse to archive the shell. Report the refusal on the bar.
+151. List the archived sessions in a modal on `Alt+Shift+L`, newest first. Close the modal with the same binding or with `Esc`. Send no key to a child while the modal is open.
+152. Give the archive list a search box of its own. Filter the archived sessions by name on every keystroke, ignoring case. Leave the paused search unchanged.
+153. Restore the highlighted session with `Enter` or with `Alt+Shift+A`. Resume a session that was active with `claude --resume <uuid>`. Start no process for a session that was paused.
+154. Refuse to restore a session that was active while nine sessions are active. Keep the session archived, and report the limit inside the list.
+155. Look for the transcript before a restore. When the transcript no longer exists, remove the session from the archive and report the reason inside the list. Keep the worktrees and the branch on disk.
+
 ## Out of scope
 
 - Git diff, commit, push, and any other version control action beyond worktree and branch management.
@@ -290,6 +304,7 @@ Every question below was open in the first version of this document. Each row re
 | 14 | Copying out of a panel | culm owns the selection. A drag marks it, a release copies it through OSC 52, and a middle click pastes it. The earlier plan, a binding that turns mouse capture off, is dropped. | 2026-09-06 |
 | 15 | Naming an imported session | The transcript title when it holds one. Otherwise a headless `claude -p --model haiku` child reads the first prompt and answers with a name. Otherwise the first eight characters of the id. | 2026-09-06 |
 | 16 | Confirming a session delete | Two buttons, with the cursor on no. `y` and `n` move the cursor, `Enter` answers, and a click answers. The typed name is dropped, because retyping a name is friction rather than safety when the default answer is already no. | 2026-09-07 |
+| 17 | Archive or pause | Both stop the process. A pause keeps the session in the sidebar and in the paused search, and takes a recap while `recap-on-pause` is on. An archive removes the session from both and never takes a recap. | 2026-10-10 |
 
 ## Deferred
 
