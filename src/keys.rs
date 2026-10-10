@@ -12,7 +12,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostAction {
     Quit,
-    Focus(usize),
+    /// A tab, counted from zero. `Alt+1` to `Alt+8` reach the eight tabs.
+    FocusTab(usize),
     FocusShell,
     NewSession,
     TogglePause,
@@ -27,6 +28,8 @@ pub enum HostAction {
     ToggleArchive,
     ShowArchive,
     TogglePane,
+    NewTab,
+    CloseTab,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -54,7 +57,7 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
     }
     match k.code {
         KeyCode::Char('0') => Some(HostAction::FocusShell),
-        KeyCode::Char(c @ '1'..='9') => Some(HostAction::Focus(c as usize - '1' as usize)),
+        KeyCode::Char(c @ '1'..='8') => Some(HostAction::FocusTab(c as usize - '1' as usize)),
         KeyCode::Char('N') => Some(HostAction::NewSession),
         KeyCode::Char('n') if shift => Some(HostAction::NewSession),
         KeyCode::Char('P') => Some(HostAction::TogglePause),
@@ -75,6 +78,10 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('a') if shift => Some(HostAction::ToggleArchive),
         KeyCode::Char('L') => Some(HostAction::ShowArchive),
         KeyCode::Char('l') if shift => Some(HostAction::ShowArchive),
+        KeyCode::Char('T') => Some(HostAction::NewTab),
+        KeyCode::Char('t') if shift => Some(HostAction::NewTab),
+        KeyCode::Char('W') => Some(HostAction::CloseTab),
+        KeyCode::Char('w') if shift => Some(HostAction::CloseTab),
         KeyCode::Char('O') => Some(HostAction::TogglePane),
         KeyCode::Char('o') if shift => Some(HostAction::TogglePane),
         _ => None,
@@ -107,8 +114,8 @@ pub fn encode(k: &KeyEvent, cursor: CursorKeys) -> Option<Vec<u8>> {
         }
         // Shift+Enter carries no legacy encoding of its own, so a plain terminal
         // collapses it onto Enter and the prompt submits. Claude Code's own
-        // `/terminal-setup` binds it to ESC then CR, checked on 2026-09-07 against
-        // the CLI version in FINDINGS.md, so that is what culm sends. With Alt also
+        // `/terminal-setup` binds it to ESC then CR, checked on 2026-09-07, so that is
+        // what culm sends. With Alt also
         // held the arm below adds the same prefix, so the two agree.
         KeyCode::Enter if shift && !alt => vec![0x1b, b'\r'],
         KeyCode::Enter => vec![b'\r'],
@@ -332,9 +339,45 @@ mod tests {
     }
 
     #[test]
-    fn alt_digit_focuses_a_session() {
+    fn alt_digit_focuses_a_tab() {
         let action = host_action(&key(KeyCode::Char('2'), KeyModifiers::ALT));
-        assert_eq!(action, Some(HostAction::Focus(1)));
+        assert_eq!(action, Some(HostAction::FocusTab(1)));
+        let last = host_action(&key(KeyCode::Char('8'), KeyModifiers::ALT));
+        assert_eq!(last, Some(HostAction::FocusTab(7)));
+    }
+
+    #[test]
+    fn alt_shift_t_and_w_open_and_close_tabs_on_both_keyboard_paths() {
+        let shifted = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert_eq!(
+            host_action(&key(KeyCode::Char('T'), KeyModifiers::ALT)),
+            Some(HostAction::NewTab)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('t'), shifted)),
+            Some(HostAction::NewTab)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('W'), KeyModifiers::ALT)),
+            Some(HostAction::CloseTab)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('w'), shifted)),
+            Some(HostAction::CloseTab)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Char('w'), KeyModifiers::ALT)),
+            None,
+            "Alt+w stays with the child"
+        );
+    }
+
+    #[test]
+    fn alt_nine_reaches_the_child() {
+        assert_eq!(
+            host_action(&key(KeyCode::Char('9'), KeyModifiers::ALT)),
+            None
+        );
     }
 
     #[test]

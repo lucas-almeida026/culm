@@ -15,6 +15,57 @@ type TranscriptKey = (String, String);
 /// Its modification time and its text.
 type TranscriptValue = (u64, String);
 
+/// Hands each listened project a channel the test sends on, and records releases.
+#[derive(Debug, Clone, Default)]
+pub struct FakeHookListener {
+    senders: Arc<
+        Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::hooks::HookEvent>>>,
+    >,
+    elsewhere: Arc<Mutex<Vec<String>>>,
+    released: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeHookListener {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Posts one payload to the project, as a hook would. False when nothing listens.
+    pub fn send(&self, slug: &str, event: crate::hooks::HookEvent) -> bool {
+        lock(&self.senders)
+            .get(slug)
+            .is_some_and(|tx| tx.send(event).is_ok())
+    }
+
+    /// Makes the project look open in another culm, so listening for it fails.
+    pub fn open_elsewhere(&self, slug: &str) {
+        lock(&self.elsewhere).push(slug.to_string());
+    }
+
+    /// The projects released so far, in order.
+    #[must_use]
+    pub fn released(&self) -> Vec<String> {
+        lock(&self.released).clone()
+    }
+}
+
+impl crate::hooks::HookListener for FakeHookListener {
+    fn listen(&self, slug: &str) -> Result<std::sync::mpsc::Receiver<crate::hooks::HookEvent>> {
+        if lock(&self.elsewhere).iter().any(|s| s == slug) {
+            return Err(anyhow!("{slug} is open in another culm"));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock(&self.senders).insert(slug.to_string(), tx);
+        Ok(rx)
+    }
+
+    fn release(&self, slug: &str) {
+        lock(&self.senders).remove(slug);
+        lock(&self.released).push(slug.to_string());
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -251,6 +302,7 @@ pub struct FakeRecapper {
     /// Passes a job runs before it answers. Zero answers on the first poll.
     delay: Arc<AtomicU64>,
     refuse_to_start: Arc<AtomicBool>,
+    kills: Arc<AtomicU64>,
 }
 
 impl Default for FakeRecapper {
@@ -267,7 +319,14 @@ impl FakeRecapper {
             answer: Arc::new(Mutex::new(Ok("did the thing".to_string()))),
             delay: Arc::new(AtomicU64::new(0)),
             refuse_to_start: Arc::new(AtomicBool::new(false)),
+            kills: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many jobs were killed before they answered.
+    #[must_use]
+    pub fn kills(&self) -> u64 {
+        self.kills.load(Ordering::Relaxed)
     }
 
     /// The session ids culm asked about, in order.
@@ -308,6 +367,7 @@ impl crate::recap::Recapper for FakeRecapper {
             left: self.delay.load(Ordering::Relaxed),
             answer: lock(&self.answer).clone(),
             killed: false,
+            kills: Arc::clone(&self.kills),
         }))
     }
 }
@@ -317,6 +377,7 @@ struct FakeRecapJob {
     left: u64,
     answer: Result<String, String>,
     killed: bool,
+    kills: Arc<AtomicU64>,
 }
 
 impl crate::recap::RecapJob for FakeRecapJob {
@@ -336,6 +397,7 @@ impl crate::recap::RecapJob for FakeRecapJob {
 
     fn kill(&mut self) {
         self.killed = true;
+        self.kills.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -420,6 +482,7 @@ pub struct MemoryStore {
     /// Transcript text by directory and id, and the time each file carries.
     transcripts: Arc<Mutex<std::collections::HashMap<TranscriptKey, TranscriptValue>>>,
     config: Arc<Mutex<crate::config::Config>>,
+    workspaces: Arc<Mutex<crate::workspace::Workspaces>>,
 }
 
 impl Default for MemoryStore {
@@ -433,6 +496,7 @@ impl Default for MemoryStore {
             claude_dirs: Arc::new(Mutex::new(Vec::new())),
             transcripts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             config: Arc::new(Mutex::new(crate::config::Config::default())),
+            workspaces: Arc::new(Mutex::new(crate::workspace::Workspaces::default())),
         }
     }
 }
@@ -456,6 +520,16 @@ impl MemoryStore {
 
     pub fn put_project(&self, project: &crate::project::Project) {
         lock(&self.projects).insert(project.slug.clone(), project.clone());
+    }
+
+    /// Every workspace, as the store holds them now.
+    #[must_use]
+    pub fn workspaces(&self) -> crate::workspace::Workspaces {
+        lock(&self.workspaces).clone()
+    }
+
+    pub fn put_workspaces(&self, workspaces: &crate::workspace::Workspaces) {
+        *lock(&self.workspaces) = workspaces.clone();
     }
 
     /// Seeds the settings, so a test opens with the recap already switched on.
@@ -545,6 +619,15 @@ impl crate::store::Store for MemoryStore {
 
     fn save_config(&self, config: &crate::config::Config) -> Result<()> {
         *lock(&self.config) = config.clone();
+        Ok(())
+    }
+
+    fn load_workspaces(&self) -> Result<crate::workspace::Workspaces> {
+        Ok(lock(&self.workspaces).clone())
+    }
+
+    fn save_workspaces(&self, workspaces: &crate::workspace::Workspaces) -> Result<()> {
+        *lock(&self.workspaces) = workspaces.clone();
         Ok(())
     }
 

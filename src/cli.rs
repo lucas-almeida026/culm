@@ -21,7 +21,7 @@ use crate::transcript;
 #[command(
     name = "culm",
     version,
-    about = "Many Claude Code sessions in one project, as vertical tabs."
+    about = "Many projects as tabs, and many Claude Code sessions in each."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -30,14 +30,21 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Open a project in the interface.
+    /// Open projects in the interface, one tab each.
     Open {
-        /// Project slug. Defaults to the project that owns the working directory.
-        project: Option<String>,
-        /// Import every Claude Code session found under the root before opening.
+        /// Project slugs, at most eight. Defaults to the project that owns the
+        /// working directory.
+        projects: Vec<String>,
+        /// Open the projects of a workspace instead.
+        #[arg(short = 'w', long, conflicts_with = "projects")]
+        workspace: Option<String>,
+        /// Import every Claude Code session found under each root before opening.
         #[arg(long)]
         import_native_sessions: bool,
     },
+    /// Name sets of projects, so one command opens all of them as tabs.
+    #[command(subcommand)]
+    Workspace(WorkspaceCmd),
     /// Register projects and their repositories.
     #[command(subcommand)]
     Project(ProjectCmd),
@@ -50,6 +57,24 @@ pub enum Command {
     /// Hook client. Reads one payload on stdin and posts it to the interface.
     #[command(hide = true)]
     Hook,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCmd {
+    /// Create a workspace, with the projects it opens, in tab order.
+    New { name: String, projects: Vec<String> },
+    /// List every workspace and its projects.
+    List,
+    /// Show the projects of one workspace, in tab order.
+    Show { name: String },
+    /// Delete a workspace. Its projects are left alone.
+    Rm { name: String },
+    /// Add a project to a workspace, as its last tab.
+    Add { name: String, project: String },
+    /// Remove a project from a workspace. The project itself is left alone.
+    Remove { name: String, project: String },
+    /// Rename a workspace.
+    Rename { name: String, new_name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,11 +171,19 @@ pub enum HooksCmd {
     Uninstall,
 }
 
+/// The projects an `open` hands to the interface, in tab order.
+#[derive(Debug)]
+pub struct OpenPlan {
+    pub projects: Vec<Project>,
+    /// The workspace the projects came from, and the projects it held.
+    pub workspace: Option<crate::browser::WorkspaceOrigin>,
+}
+
 /// What the caller must do after the command ran.
 #[derive(Debug)]
 pub enum Outcome {
-    /// Open this project in the interface.
-    Open(Box<Project>),
+    /// Open these projects in the interface.
+    Open(Box<OpenPlan>),
     /// The command is finished.
     Done,
 }
@@ -165,17 +198,20 @@ pub fn run(
     cwd: &Path,
 ) -> Result<Outcome> {
     match cli.command {
-        None => open(store, namer, None, cwd, false),
+        None => open(store, namer, &[], cwd, false),
         Some(Command::Open {
-            project,
+            projects,
+            workspace: Some(workspace),
             import_native_sessions,
-        }) => open(
-            store,
-            namer,
-            project.as_deref(),
-            cwd,
+        }) if projects.is_empty() => {
+            open_workspace(store, namer, &workspace, import_native_sessions)
+        }
+        Some(Command::Open {
+            projects,
             import_native_sessions,
-        ),
+            ..
+        }) => open(store, namer, &projects, cwd, import_native_sessions),
+        Some(Command::Workspace(cmd)) => workspace_cmd(store, cmd),
         Some(Command::Config(ConfigCmd::List)) => config_list(store),
         Some(Command::Config(ConfigCmd::Set { key, value })) => config_set(store, &key, &value),
         Some(Command::Hook) => {
@@ -299,6 +335,9 @@ fn project_rename(
     store.save_project(&project)?;
     store.save_registry(&registry)?;
     store.remove_project(&entry.slug)?;
+    let mut workspaces = store.load_workspaces()?;
+    workspaces.rename_project(&entry.slug, &new_slug);
+    store.save_workspaces(&workspaces)?;
     println!("project {} is now {new_slug}", entry.slug);
     println!("an interface already open on it keeps the old name until it closes.");
     Ok(Outcome::Done)
@@ -509,6 +548,9 @@ fn project_rm(
     store.remove_project(slug)?;
     registry.projects.retain(|p| p.slug != slug);
     store.save_registry(&registry)?;
+    let mut workspaces = store.load_workspaces()?;
+    workspaces.drop_project(slug);
+    store.save_workspaces(&workspaces)?;
     println!("project {slug} removed");
     Ok(Outcome::Done)
 }
@@ -588,18 +630,145 @@ fn repo_list(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Outcom
     Ok(Outcome::Done)
 }
 
+/// Opens the named projects, one tab each, or the project that owns the working
+/// directory when none is named. A project named twice opens once.
 fn open(
     store: &dyn Store,
     namer: &dyn Namer,
-    slug: Option<&str>,
+    slugs: &[String],
     cwd: &Path,
     import: bool,
 ) -> Result<Outcome> {
-    let mut project = resolve(store, slug, cwd)?;
-    if import {
-        report(&import_sessions(store, namer, &mut project)?);
+    let slugs = crate::workspace::without_repeats(slugs);
+    if slugs.len() > crate::workspace::MAX_PROJECTS {
+        bail!(
+            "culm opens at most {} projects at once",
+            crate::workspace::MAX_PROJECTS
+        );
     }
-    Ok(Outcome::Open(Box::new(project)))
+    let mut projects = Vec::new();
+    if slugs.is_empty() {
+        projects.push(resolve(store, None, cwd)?);
+    }
+    for slug in &slugs {
+        projects.push(resolve(store, Some(slug), cwd)?);
+    }
+    if import {
+        for project in &mut projects {
+            report(&import_sessions(store, namer, project)?);
+        }
+    }
+    Ok(Outcome::Open(Box::new(OpenPlan {
+        projects,
+        workspace: None,
+    })))
+}
+
+/// Opens the projects of a workspace, in its order. A project removed since the
+/// workspace was saved is reported and skipped.
+fn open_workspace(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    name: &str,
+    import: bool,
+) -> Result<Outcome> {
+    let workspaces = store.load_workspaces()?;
+    let workspace = workspaces
+        .find(name)
+        .ok_or_else(|| anyhow!("{}", crate::workspace::WorkspaceError::Unknown(name.into())))?
+        .clone();
+    let registry = store.load_registry()?;
+    let mut projects = Vec::new();
+    for slug in &workspace.projects {
+        match registry.find(slug) {
+            Some(entry) => projects.push(load_or_new(store, entry)?),
+            None => println!(
+                "{} holds {slug}, which is no longer a project. skipped.",
+                workspace.name
+            ),
+        }
+    }
+    if projects.is_empty() {
+        bail!(
+            "{} holds no project. add one with: culm workspace add {} <project>",
+            workspace.name,
+            workspace.name
+        );
+    }
+    if import {
+        for project in &mut projects {
+            report(&import_sessions(store, namer, project)?);
+        }
+    }
+    Ok(Outcome::Open(Box::new(OpenPlan {
+        projects,
+        workspace: Some(crate::browser::WorkspaceOrigin {
+            name: workspace.name,
+            projects: workspace.projects,
+        }),
+    })))
+}
+
+fn workspace_cmd(store: &dyn Store, cmd: WorkspaceCmd) -> Result<Outcome> {
+    let mut all = store.load_workspaces()?;
+    let registry = store.load_registry()?;
+    let known = |slug: &str| -> Result<()> {
+        if registry.find(slug).is_none() {
+            bail!("no project named {slug}. run: culm project list");
+        }
+        Ok(())
+    };
+    match cmd {
+        WorkspaceCmd::List => {
+            if all.workspaces.is_empty() {
+                println!("no workspace yet. run: culm workspace new <name> <project>...");
+            }
+            for workspace in &all.workspaces {
+                println!("{:<20} {}", workspace.name, workspace.projects.join(" "));
+            }
+            return Ok(Outcome::Done);
+        }
+        WorkspaceCmd::Show { name } => {
+            let workspace = all
+                .find(&name)
+                .ok_or_else(|| anyhow!("{}", crate::workspace::WorkspaceError::Unknown(name)))?;
+            for project in &workspace.projects {
+                println!("{project}");
+            }
+            return Ok(Outcome::Done);
+        }
+        WorkspaceCmd::New { name, projects } => {
+            for project in &projects {
+                known(project)?;
+            }
+            let slug = all.create(&name, &projects).map_err(|e| anyhow!("{e}"))?;
+            println!("workspace {slug} created. open it with: culm open -w {slug}");
+        }
+        WorkspaceCmd::Rm { name } => {
+            let gone = all.remove(&name).map_err(|e| anyhow!("{e}"))?;
+            println!(
+                "workspace {} removed. its projects are untouched.",
+                gone.name
+            );
+        }
+        WorkspaceCmd::Add { name, project } => {
+            known(&project)?;
+            all.add_project(&name, &project)
+                .map_err(|e| anyhow!("{e}"))?;
+            println!("{name} now holds {project}");
+        }
+        WorkspaceCmd::Remove { name, project } => {
+            all.remove_project(&name, &project)
+                .map_err(|e| anyhow!("{e}"))?;
+            println!("{name} no longer holds {project}");
+        }
+        WorkspaceCmd::Rename { name, new_name } => {
+            let slug = all.rename(&name, &new_name).map_err(|e| anyhow!("{e}"))?;
+            println!("workspace {name} is now {slug}");
+        }
+    }
+    store.save_workspaces(&all)?;
+    Ok(Outcome::Done)
 }
 
 /// Finds the project by slug, or the project that owns the working directory.

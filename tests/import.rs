@@ -367,7 +367,7 @@ fn open_with_the_flag_imports_before_the_interface_starts() {
     .expect("open succeeds");
 
     match outcome {
-        Outcome::Open(project) => assert_eq!(project.sessions.len(), 1),
+        Outcome::Open(plan) => assert_eq!(plan.projects[0].sessions.len(), 1),
         Outcome::Done => panic!("open must hand back a project"),
     }
 }
@@ -412,12 +412,14 @@ fn an_imported_session_resumes_its_own_transcript() {
     let spawner = FakeSpawner::new(Vec::new());
     let clock = culm::testing::FakeClock::new(1_000);
     let recapper = culm::testing::FakeRecapper::new();
+    let listener = culm::testing::FakeHookListener::new();
     let deps = culm::app::Deps {
         spawner: &spawner,
         git: &f.git,
         store: &f.store,
         clock: &clock,
         recapper: &recapper,
+        hooks: &listener,
     };
     let mut app = culm::app::App::open(project, &deps, 20, 50);
     app.set_focus(0);

@@ -205,7 +205,7 @@ impl PtySpawner for SystemPtySpawner {
         }
 
         let child = pair.slave.spawn_command(cmd)?;
-        // Release the slave, otherwise the master never reaches end of file. See FINDINGS.md.
+        // Release the slave, otherwise the master never reaches end of file.
         drop(pair.slave);
 
         let reader = pair.master.try_clone_reader()?;

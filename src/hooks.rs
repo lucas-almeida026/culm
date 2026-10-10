@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -212,6 +212,35 @@ pub fn socket_path(slug: &str) -> PathBuf {
             let uid = nix::unistd::getuid().as_raw();
             PathBuf::from(format!("/tmp/culm-{uid}-{slug}.sock"))
         }
+    }
+}
+
+/// The process boundary for attention markers: one socket per open project.
+pub trait HookListener: std::fmt::Debug {
+    /// Starts listening for one project. Fails when another culm already listens for
+    /// it, because two windows on one project would resume the same sessions.
+    fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>>;
+    /// Stops listening for one project, and removes its socket.
+    fn release(&self, slug: &str);
+}
+
+/// Listens on the real Unix socket of each project.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SocketHookListener;
+
+impl HookListener for SocketHookListener {
+    fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>> {
+        let path = socket_path(slug);
+        // A socket file that answers belongs to a live culm. One that refuses is
+        // left over from a crash, and `listen` replaces it.
+        if UnixStream::connect(&path).is_ok() {
+            bail!("{slug} is open in another culm");
+        }
+        listen(&path)
+    }
+
+    fn release(&self, slug: &str) {
+        let _ = std::fs::remove_file(socket_path(slug));
     }
 }
 

@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use culm::app::{App, Deps};
-use culm::cli::{Cli, Outcome};
+use culm::app::Deps;
+use culm::browser::{Browser, BrowserHit};
+use culm::cli::{Cli, OpenPlan, Outcome};
 use culm::clock::SystemClock;
 use culm::git::SystemGit;
 use culm::namer::ClaudeNamer;
-use culm::project::Project;
 use culm::pty::SystemPtySpawner;
 use culm::recap::ClaudeRecapper;
 use culm::stats::ProcMemoryProbe;
@@ -44,13 +44,11 @@ fn main() -> Result<()> {
 
     match cli::run(parsed, &store, &SystemGit, &ClaudeNamer, &exe, &cwd)? {
         Outcome::Done => Ok(()),
-        Outcome::Open(project) => open(*project, &store),
+        Outcome::Open(plan) => open(*plan, &store),
     }
 }
 
-fn open(project: Project, store: &FsStore) -> Result<()> {
-    let socket = hooks::socket_path(&project.slug);
-    let hook_rx = hooks::listen(&socket).ok();
+fn open(plan: OpenPlan, store: &FsStore) -> Result<()> {
     let installed = store
         .read_claude_settings()
         .map(|s| hooks::is_installed(&s))
@@ -75,14 +73,7 @@ fn open(project: Project, store: &FsStore) -> Result<()> {
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = run(
-        &mut terminal,
-        project,
-        store,
-        installed,
-        kitty_keys,
-        hook_rx.as_ref(),
-    );
+    let result = run(&mut terminal, plan, store, installed, kitty_keys);
 
     disable_raw_mode()?;
     if kitty_keys {
@@ -95,67 +86,57 @@ fn open(project: Project, store: &FsStore) -> Result<()> {
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
-    let _ = std::fs::remove_file(&socket);
     result
 }
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    project: Project,
+    plan: OpenPlan,
     store: &FsStore,
     hooks_installed: bool,
     keyboard_enhanced: bool,
-    hook_rx: Option<&std::sync::mpsc::Receiver<hooks::HookEvent>>,
 ) -> Result<()> {
     let spawner = SystemPtySpawner;
     let git = SystemGit;
     let probe = ProcMemoryProbe;
     let clock = SystemClock;
     let recapper = ClaudeRecapper;
+    let listener = hooks::SocketHookListener;
     let deps = Deps {
         spawner: &spawner,
         git: &git,
         store,
         clock: &clock,
         recapper: &recapper,
+        hooks: &listener,
     };
 
-    // The first sessions start before the first draw, so the panel size is derived
-    // from the terminal rather than from a frame. It uses the width the project was
-    // left at, or a restored sidebar would reflow every session on the first frame.
+    // The first sessions start before the first draw, so every panel is sized from
+    // the terminal rather than from a frame.
     let area = terminal.get_frame().area();
-    let sidebar = project.sidebar_width();
-    let panel = Rect {
-        x: sidebar,
-        y: 0,
-        width: area.width.saturating_sub(sidebar),
-        height: area.height.saturating_sub(1),
-    };
-    let (rows, cols) = ui::panel_size(panel);
+    let config = store.load_config().unwrap_or_default();
+    let mut browser = Browser::open(plan.projects, plan.workspace, area, config, &deps)?;
+    browser.set_hooks_installed(hooks_installed);
+    browser.set_keyboard_enhanced(keyboard_enhanced);
 
-    let mut app = App::open(project, &deps, rows, cols);
-    app.set_config(store.load_config().unwrap_or_default());
-    app.set_hooks_installed(hooks_installed);
-    app.set_keyboard_enhanced(keyboard_enhanced);
-
-    let mut hit = ui::HitBox::default();
+    let mut hit = BrowserHit::default();
     let mut last_draw = Instant::now();
     let mut last_tick = Instant::now();
     let mut fps_since = Instant::now();
     let mut frames = 0u32;
 
-    while !app.quit_requested() {
+    while !browser.quit_requested() {
         // Input first, so a keystroke never waits behind a frame.
         if event::poll(Duration::from_millis(4))? {
             match event::read()? {
-                Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(&k, &deps)?,
-                Event::Paste(text) => app.on_paste(&text)?,
+                Event::Key(k) if k.kind != KeyEventKind::Release => browser.on_key(&k, &deps)?,
+                Event::Paste(text) => browser.on_paste(&text)?,
                 Event::Mouse(m) => {
-                    app.on_mouse_with(m.kind, m.column, m.row, m.modifiers, &hit, &deps);
+                    browser.on_mouse(m.kind, m.column, m.row, m.modifiers, &hit, &deps);
                     // Only the loop owns the output stream, so the copy is written
                     // here. One escape, and no cursor movement, so the drawn buffer
                     // stays valid.
-                    if let Some(text) = app.take_copy() {
+                    if let Some(text) = browser.take_copy() {
                         let backend = terminal.backend_mut();
                         backend.write_all(&clipboard::osc52(&text))?;
                         backend.flush()?;
@@ -165,44 +146,34 @@ fn run(
             }
         }
 
-        // A quit waits on children culm does not control. The wait runs here, a pass
-        // at a time, so the closing screen keeps drawing instead of freezing.
-        app.poll_close(&deps)?;
-
-        // A recap runs as a headless child after a pause, so it is polled here too.
-        app.poll_recap(&deps);
-
-        // A child that paints its own scrolling repaints after the notch reaches it,
-        // so the distance its text moved is measured here, on a later pass.
-        app.settle_scroll();
-
-        if let Some(rx) = hook_rx {
-            while let Ok(event) = rx.try_recv() {
-                app.on_hook(&event);
-            }
-        }
+        // Hooks, recaps, scroll measurement, and closes all move a pass at a time,
+        // so the screen keeps drawing while children leave.
+        browser.poll(&deps)?;
 
         if last_tick.elapsed() >= TICK {
             last_tick = Instant::now();
-            app.on_tick(&probe, &deps)?;
+            browser.on_tick(&probe, &deps)?;
         }
 
         if last_draw.elapsed() < FRAME_BUDGET {
             continue;
         }
         last_draw = Instant::now();
-        terminal.draw(|f| hit = ui::draw(f, &app))?;
+        let mut area = Rect::default();
+        terminal.draw(|f| {
+            area = f.area();
+            hit = ui::draw_browser(f, &browser);
+        })?;
 
         frames += 1;
         let elapsed = fps_since.elapsed();
         if elapsed >= Duration::from_secs(1) {
-            app.set_fps(f64::from(frames) / elapsed.as_secs_f64());
+            browser.set_fps(f64::from(frames) / elapsed.as_secs_f64());
             frames = 0;
             fps_since = Instant::now();
         }
 
-        let (rows, cols) = ui::panel_size(hit.panel);
-        app.resize_all(rows, cols)?;
+        browser.resize(area)?;
     }
     Ok(())
 }

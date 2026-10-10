@@ -21,8 +21,8 @@ use crate::session::Session;
 use crate::stats::MemoryProbe;
 use crate::store::Store;
 
-/// Nine sessions is the limit, because one digit addresses a session.
-pub const MAX_ACTIVE: usize = 9;
+/// Eight active sessions per project is the limit.
+pub const MAX_ACTIVE: usize = 8;
 
 // The sidebar limits live with the project, because a project now saves its width.
 pub use crate::project::{SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN};
@@ -64,6 +64,7 @@ pub struct Deps<'a> {
     pub store: &'a dyn Store,
     pub clock: &'a dyn Clock,
     pub recapper: &'a dyn Recapper,
+    pub hooks: &'a dyn crate::hooks::HookListener,
 }
 
 impl std::fmt::Debug for Deps<'_> {
@@ -340,7 +341,9 @@ impl App {
     /// Builds the interface from saved state and starts every active session.
     ///
     /// A paused session gets no process. A session that fails to start is reported
-    /// and left paused, so one broken session never stops the rest.
+    /// and left paused, so one broken session never stops the rest. A project saved
+    /// with more active sessions than the limit, by an older culm, starts the first
+    /// `MAX_ACTIVE` and leaves the rest paused.
     pub fn open(project: Project, deps: &Deps<'_>, rows: u16, cols: u16) -> Self {
         let mut app = Self::new(project);
         app.rows = rows;
@@ -348,6 +351,8 @@ impl App {
         app.now = deps.clock.now_secs();
         let records = std::mem::take(&mut app.project.sessions);
         let mut failed = Vec::new();
+        let mut over_limit = 0usize;
+        let mut started = 0usize;
         for mut record in records {
             let mut entry = Entry {
                 live: None,
@@ -355,9 +360,14 @@ impl App {
                 rss: 0,
                 record: record.clone(),
             };
-            if record.is_active() {
+            if record.is_active() && started >= MAX_ACTIVE {
+                entry.record.state = SessionState::Paused;
+                failed.push(record.id.clone());
+                over_limit += 1;
+            } else if record.is_active() {
                 match app.start(&record, deps) {
                     Ok(session) => {
+                        started += 1;
                         record.started = true;
                         entry.record = record;
                         entry.live = Some(session);
@@ -373,6 +383,11 @@ impl App {
         }
         for id in &failed {
             app.lift(id);
+        }
+        if over_limit > 0 {
+            app.status_text = format!(
+                "{over_limit} sessions opened paused: {MAX_ACTIVE} active sessions is the limit"
+            );
         }
         app.reorder();
         app.spawn_shell(deps);
@@ -744,6 +759,11 @@ impl App {
             .collect()
     }
 
+    /// Replaces the last copy, so a copy made in another tab pastes here too.
+    pub fn set_clipboard(&mut self, text: String) {
+        self.clipboard = text;
+    }
+
     /// The last copy, which a middle click pastes.
     #[must_use]
     pub fn clipboard(&self) -> &str {
@@ -843,6 +863,27 @@ impl App {
         self.keyboard_enhanced
     }
 
+    pub fn set_nerd_mode(&mut self, on: bool) {
+        self.nerd_mode = on;
+    }
+
+    /// Shows a message on the bar until something replaces it. The browser reports
+    /// what happened to a tab through this.
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.set_status(text);
+    }
+
+    /// The most urgent marker among the sessions, which the tab of this project
+    /// shows.
+    #[must_use]
+    pub fn attention(&self) -> Attention {
+        self.entries
+            .iter()
+            .map(|e| e.attention)
+            .max()
+            .unwrap_or(Attention::None)
+    }
+
     #[must_use]
     pub fn nerd_mode(&self) -> bool {
         self.nerd_mode
@@ -893,12 +934,9 @@ impl App {
         }
         match host_action(key) {
             Some(HostAction::Quit) => self.request_close(deps),
-            Some(HostAction::Focus(i)) => {
-                if i < self.active_count() {
-                    self.set_focus(i);
-                    self.set_pane(Pane::Panel);
-                }
-            }
+            // Tabs are the browser's business, not a project's. A project that
+            // receives one of these keys does nothing with it.
+            Some(HostAction::FocusTab(_) | HostAction::NewTab | HostAction::CloseTab) => {}
             Some(HostAction::NewSession) => self.open_form(),
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
@@ -1426,6 +1464,9 @@ impl App {
                 });
                 self.reorder();
                 self.focus_slug_of_last_active();
+                // A session made from the shell is still the one the user wants
+                // to see, so the shell lets go of the panel.
+                self.shell_focused = false;
                 self.set_pane(Pane::Panel);
                 self.clear_status();
                 self.save(deps)?;
@@ -1812,6 +1853,11 @@ impl App {
     /// Once a second: reap a child that ended on its own, and sample memory.
     pub fn on_tick(&mut self, probe: &dyn MemoryProbe, deps: &Deps<'_>) -> Result<()> {
         self.now = deps.clock.now_secs();
+        // A closing project reaps its own children in `poll_close`, and a shell that
+        // leaves during the close, or after it, must stay gone.
+        if self.closing.is_some() || self.quit {
+            return Ok(());
+        }
         let mut reaped = Vec::new();
         for entry in &mut self.entries {
             let Some(session) = entry.live.as_mut() else {
@@ -1887,7 +1933,7 @@ impl App {
 
     /// Asks every child to leave and hands the wait to the loop, so the screen keeps
     /// drawing instead of freezing for the whole grace period.
-    fn begin_close(&mut self, deps: &Deps<'_>) {
+    pub fn begin_close(&mut self, deps: &Deps<'_>) {
         self.modal = None;
         self.selection = None;
         for entry in &mut self.entries {
@@ -1941,6 +1987,11 @@ impl App {
         }
         self.shell = None;
         // Only a quit the user cut short is worth reporting next time.
+        // A recap is a child as well. Left alone it would outlive culm, and its
+        // answer would reach no one.
+        if let Some(mut work) = self.recap_work.take() {
+            work.job.kill();
+        }
         self.project.forced_quit = closing.forced;
         self.closing = None;
         self.quit = true;
@@ -1964,7 +2015,7 @@ impl App {
     }
 
     /// Cuts the wait short. The children that are left get killed on the next pass.
-    fn force_close(&mut self) {
+    pub fn force_close(&mut self) {
         if let Some(closing) = self.closing.as_mut() {
             closing.forced = true;
         }
@@ -2018,17 +2069,19 @@ impl App {
                 MouseEventKind::Moved | MouseEventKind::Drag(_) | MouseEventKind::Down(_)
             )
         {
-            if column < hit.sidebar_width {
+            if hit.in_sidebar(at) {
                 self.set_pane(Pane::Sidebar);
             } else if hit.panel.contains(at) {
                 self.set_pane(Pane::Panel);
             }
         }
         match kind {
-            MouseEventKind::Down(MouseButton::Left) if column == hit.separator_col => {
+            MouseEventKind::Down(MouseButton::Left)
+                if column == hit.separator_col && hit.in_sidebar(at) =>
+            {
                 self.dragging = true;
             }
-            MouseEventKind::Down(MouseButton::Left) if column < hit.sidebar_width => {
+            MouseEventKind::Down(MouseButton::Left) if hit.in_sidebar(at) => {
                 if hit.search_row == Some(row) {
                     self.filter_focused = true;
                     return;

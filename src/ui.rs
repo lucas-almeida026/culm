@@ -12,6 +12,7 @@ use tui_term::widget::PseudoTerminal;
 use crate::app::{
     Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Pane, Rename,
 };
+use crate::browser::{Browser, BrowserHit, BrowserModal, Picker, SaveChoice, SavePrompt};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -30,6 +31,17 @@ pub struct HitBox {
     pub search_row: Option<u16>,
     /// Where each button of the open confirmation sits. A click answers it.
     pub buttons: Vec<(Rect, Answer)>,
+}
+
+impl HitBox {
+    /// True when `at` falls on the sidebar. The sidebar spans the rows the panel
+    /// spans, so a row above it, such as the tab bar, never counts.
+    #[must_use]
+    pub fn in_sidebar(&self, at: Position) -> bool {
+        at.x < self.sidebar_width
+            && at.y >= self.panel.y
+            && at.y < self.panel.y.saturating_add(self.panel.height)
+    }
 }
 
 impl Default for HitBox {
@@ -101,25 +113,310 @@ fn draw_closing(f: &mut Frame, app: &App) {
     );
 }
 
+/// Splits the window into the tab bar, one row at the top, and the area below it
+/// that the focused project fills.
+#[must_use]
+pub fn split_tab_bar(area: Rect) -> (Rect, Rect) {
+    let bar = Rect {
+        height: area.height.min(1),
+        ..area
+    };
+    let body = Rect {
+        y: area.y.saturating_add(bar.height),
+        height: area.height.saturating_sub(bar.height),
+        ..area
+    };
+    (bar, body)
+}
+
+/// The whole window: the tab bar, the focused project, and the window's own form.
+pub fn draw_browser(f: &mut Frame, browser: &Browser) -> BrowserHit {
+    if browser.quitting() {
+        draw_closing(f, browser.app());
+        // Nothing on this screen answers a click.
+        return BrowserHit::default();
+    }
+    let (bar, body) = split_tab_bar(f.area());
+    let tabs = draw_tab_bar(f, browser, bar);
+    let app = draw_app(f, browser.app(), body);
+    match browser.modal() {
+        Some(BrowserModal::Picker(picker)) => draw_picker(f, picker, app.panel),
+        Some(BrowserModal::SavePrompt(prompt)) => draw_save_prompt(f, browser, prompt, app.panel),
+        None => {}
+    }
+    BrowserHit { tabs, app }
+}
+
+/// The fill of the focused tab. Yellow sets it apart from the cyan of the focused
+/// pane, so the two highlights never read as one.
+const TAB_FOCUSED: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Yellow)
+    .add_modifier(Modifier::BOLD);
+
+/// One tab per open project: its most urgent marker, then its name. The marker sits
+/// outside the fill, and a tab with no marker keeps the two columns, so the names
+/// never shift as markers come and go.
+///
+/// Names are shortened evenly when every tab at full length does not fit.
+fn draw_tab_bar(f: &mut Frame, browser: &Browser, bar: Rect) -> Vec<(Rect, usize)> {
+    let names: Vec<String> = browser
+        .tabs()
+        .iter()
+        .map(|t| t.app().project().slug.clone())
+        .collect();
+    // Two columns of marker and a space on either side of the name.
+    let chrome = 4usize;
+    let full: usize = names.iter().map(|n| n.chars().count() + chrome).sum();
+    let width = usize::from(bar.width);
+    let room = if full <= width || names.is_empty() {
+        usize::MAX
+    } else {
+        (width / names.len()).saturating_sub(chrome).max(1)
+    };
+
+    let mut spans = Vec::new();
+    let mut rects = Vec::new();
+    let mut x = bar.x;
+    for (index, (tab, name)) in browser.tabs().iter().zip(&names).enumerate() {
+        let marker = Span::styled(
+            tab.app().attention().emoji(),
+            Style::default().fg(color_of(tab.app().attention())),
+        );
+        let label = format!(" {} ", truncate(name, room));
+        let style = if index == browser.focused() {
+            TAB_FOCUSED
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let label = Span::styled(label, style);
+        let span_width = u16::try_from(marker.width() + label.width()).unwrap_or(u16::MAX);
+        rects.push((Rect::new(x, bar.y, span_width, bar.height), index));
+        x = x.saturating_add(span_width);
+        spans.push(marker);
+        spans.push(label);
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), bar);
+    rects
+}
+
+/// The registered projects `Alt+Shift+T` can open, with a search box of their own.
+fn draw_picker(f: &mut Frame, picker: &Picker, panel: Rect) {
+    let width = 64.min(panel.width.saturating_sub(2));
+    let inner_width = usize::from(width.saturating_sub(2));
+    let matches = picker.matches();
+    let notice = picker
+        .notice
+        .as_deref()
+        .map(|text| wrap(text, inner_width.saturating_sub(1)));
+    let notice_rows = notice.as_ref().map_or(0, |lines| lines.len() + 1);
+    let fixed = 6 + notice_rows;
+    let room = usize::from(panel.height).saturating_sub(fixed).max(1);
+    let shown = matches.len().clamp(1, room);
+    let height = u16::try_from(fixed + shown)
+        .unwrap_or(u16::MAX)
+        .min(panel.height);
+    let area = centered(panel, width, height);
+
+    let search = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let text = format!(" / {}", picker.filter);
+    let pad = inner_width.saturating_sub(text.chars().count());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(text, search),
+            Span::styled(" ".repeat(pad), search),
+        ]),
+        Line::from(""),
+    ];
+    if matches.is_empty() {
+        lines.push(dim(if picker.filter.is_empty() {
+            "  every registered project is open"
+        } else {
+            "  no match"
+        }));
+    }
+    let first = picker.cursor.saturating_sub(shown.saturating_sub(1));
+    for (offset, entry) in matches.iter().enumerate().skip(first).take(shown) {
+        let style = if offset == picker.cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let root = entry.root.display().to_string();
+        let name = truncate(&entry.slug, inner_width.saturating_sub(4));
+        let room = inner_width.saturating_sub(name.chars().count() + 4);
+        let root = truncate(&root, room);
+        let pad = room.saturating_sub(root.chars().count());
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {name}  "), style),
+            Span::styled(
+                root,
+                if offset == picker.cursor {
+                    style
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(" ".repeat(pad), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if let Some(notice) = notice {
+        for text in notice {
+            lines.push(Line::from(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(dim(" type to search   Enter opens   Esc closes"));
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" open project ")),
+        area,
+    );
+}
+
+/// The question a quit asks about the workspace, and the name field behind "save
+/// as new".
+fn draw_save_prompt(f: &mut Frame, browser: &Browser, prompt: &SavePrompt, panel: Rect) {
+    let width = 64.min(panel.width.saturating_sub(2));
+    let inner_width = usize::from(width.saturating_sub(2));
+    let count = browser.tabs().len();
+    let question = match browser.origin() {
+        Some(origin) => format!(
+            " the projects open here changed since {} opened.",
+            origin.name
+        ),
+        None => format!(" keep these {count} projects as a workspace?"),
+    };
+    let mut lines = vec![Line::from(question), Line::from("")];
+    match prompt.name.as_deref() {
+        Some(name) => {
+            lines.push(Line::from(vec![
+                Span::raw(" name  "),
+                Span::styled(
+                    format!("{name} "),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            if let Some(error) = prompt.error.as_deref() {
+                for text in wrap(error, inner_width.saturating_sub(1)) {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {text}"),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+            lines.push(dim(" Enter saves and quits   Esc goes back"));
+        }
+        None => {
+            for (index, choice) in prompt.choices.iter().enumerate() {
+                let label = match choice {
+                    SaveChoice::Update => format!(
+                        "update {}",
+                        browser.origin().map_or("", |o| o.name.as_str())
+                    ),
+                    SaveChoice::SaveAsNew => "save as a new workspace".to_string(),
+                    SaveChoice::DontSave => "quit without saving a workspace".to_string(),
+                };
+                let style = if index == prompt.cursor {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                lines.push(Line::from(Span::styled(format!("  {label}  "), style)));
+            }
+            lines.push(Line::from(""));
+            if let Some(error) = prompt.error.as_deref() {
+                for text in wrap(error, inner_width.saturating_sub(1)) {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {text}"),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+            lines.push(dim(" every project keeps its own sessions either way."));
+            lines.push(dim(" Up Down picks   Enter answers   Esc stays open"));
+        }
+    }
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(panel.height);
+    let area = centered(panel, width, height);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" save workspace ")),
+        area,
+    );
+}
+
+/// A box of the given size in the middle of `panel`.
+fn centered(panel: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: panel.x + (panel.width.saturating_sub(width)) / 2,
+        y: panel.y + (panel.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// Where one project's parts sit inside the area it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppLayout {
+    pub sidebar: Rect,
+    pub panel: Rect,
+    pub status: Rect,
+}
+
+/// Splits one project's area into the sidebar, the panel, and the bottom bar.
+///
+/// Pure, so the event loop sizes a session that is not on screen with the same
+/// arithmetic the frame uses to draw it.
+#[must_use]
+pub fn layout(area: Rect, sidebar_width: u16) -> AppLayout {
+    let vertical = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
+    let (body, status) = (vertical[0], vertical[1]);
+    let columns =
+        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(10)]).split(body);
+    AppLayout {
+        sidebar: columns[0],
+        panel: columns[1],
+        status,
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App) -> HitBox {
     if app.closing() {
         draw_closing(f, app);
         // Nothing on this screen answers a click.
         return HitBox::default();
     }
-    let vertical = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(f.area());
-    let (body, status_bar) = (vertical[0], vertical[1]);
-    let columns =
-        Layout::horizontal([Constraint::Length(app.sidebar_width()), Constraint::Min(10)])
-            .split(body);
-    let (sidebar, panel) = (columns[0], columns[1]);
+    draw_app(f, app, f.area())
+}
+
+/// Draws one project into `area`: its sidebar, its panel, its bottom bar, and its
+/// form, if one is open.
+pub fn draw_app(f: &mut Frame, app: &App, area: Rect) -> HitBox {
+    let AppLayout {
+        sidebar,
+        panel,
+        status,
+    } = layout(area, app.sidebar_width());
 
     let (rows, search_row) = draw_sidebar(f, app, sidebar);
     draw_panel(f, app, panel);
     if let Some((start, end)) = app.selection() {
         highlight(f, inner_of(panel), start, end);
     }
-    draw_status(f, app, status_bar);
+    draw_status(f, app, status);
     if app.nerd_mode() {
         draw_fps(f, app, panel);
     }
@@ -168,22 +465,21 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
     lines.push(Line::from(""));
 
     lines.push(header("active"));
-    let mut number = 0usize;
+    let mut shown = 0usize;
     for (index, entry) in app.entries().iter().enumerate() {
         if !entry.is_active() {
             continue;
         }
-        number += 1;
+        shown += 1;
         rows.push((area.y + 1 + lines.len() as u16, Focus::Entry(index)));
         lines.push(entry_line(
             entry,
-            Some(number),
             app.focus() == Focus::Entry(index),
             cursor == Some(Focus::Entry(index)),
             inner_width,
         ));
     }
-    if number == 0 {
+    if shown == 0 {
         lines.push(dim("  none"));
     }
 
@@ -200,7 +496,6 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
         rows.push((area.y + 1 + lines.len() as u16, Focus::Entry(index)));
         lines.push(entry_line(
             entry,
-            None,
             app.focus() == Focus::Entry(index),
             cursor == Some(Focus::Entry(index)),
             inner_width,
@@ -251,7 +546,7 @@ fn shell_line(app: &App, cursor: bool, inner_width: usize) -> Line<'static> {
     } else {
         String::new()
     };
-    let label = "   0 shell";
+    let label = "   shell";
     let pad = inner_width.saturating_sub(label.chars().count() + rss.chars().count());
     Line::from(vec![
         Span::styled(label.to_string(), base),
@@ -276,15 +571,8 @@ fn dim(text: &str) -> Line<'static> {
     ))
 }
 
-/// One session row: the marker, the digit that focuses it, the name, and the memory
-/// of its process tree.
-fn entry_line(
-    entry: &Entry,
-    number: Option<usize>,
-    focused: bool,
-    cursor: bool,
-    inner_width: usize,
-) -> Line<'static> {
+/// One session row: the marker, the name, and the memory of its process tree.
+fn entry_line(entry: &Entry, focused: bool, cursor: bool, inner_width: usize) -> Line<'static> {
     let base = if focused {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else if entry.is_active() {
@@ -301,10 +589,7 @@ fn entry_line(
             base.fg(color_of(entry.attention))
         },
     );
-    let label = match number {
-        Some(n) => format!(" {n} "),
-        None => "   ".to_string(),
-    };
+    let label = " ".to_string();
     let rss = if entry.is_active() && entry.rss > 0 {
         format!("{} ", format_bytes(entry.rss))
     } else {
@@ -526,8 +811,9 @@ const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
 const SHORTCUTS: [(&str, &str); 21] = [
-    ("Alt+0", "focus the shell at position 0"),
-    ("Alt+1 to Alt+9", "focus an active session"),
+    ("Alt+1 to Alt+8", "focus a project tab"),
+    ("Alt+Shift+T, W", "open a project tab, close this tab"),
+    ("Alt+0", "show this project's shell"),
     ("Alt+Shift+N", "create a session"),
     ("Alt+Shift+P", "pause or resume the focused session"),
     ("Alt+Shift+R", "rename the focused session"),
@@ -550,8 +836,7 @@ const SHORTCUTS: [(&str, &str); 21] = [
     ("Ctrl+q", "quit"),
     ("Shift+PageUp/Down", "scroll half a panel"),
     ("wheel", "scroll, or reach a mouse-aware child"),
-    ("drag", "select, and copy on release"),
-    ("alt click", "extend the selection to here"),
+    ("drag, alt click", "select and copy, extend the selection"),
     ("middle click", "paste the last copy"),
 ];
 
@@ -1034,6 +1319,7 @@ mod tests {
             store: &store,
             clock: &clock,
             recapper: &recapper,
+            hooks: &crate::testing::FakeHookListener::new(),
         };
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         app.on_key(
@@ -1086,6 +1372,7 @@ mod tests {
             store: &store,
             clock: &clock,
             recapper: &recapper,
+            hooks: &crate::testing::FakeHookListener::new(),
         };
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         let form = crate::app::NewSession {
@@ -1297,6 +1584,7 @@ mod tests {
             store: &store,
             clock: &clock,
             recapper: &recapper,
+            hooks: &crate::testing::FakeHookListener::new(),
         };
         let mut app = App::new(Project::new("spm", "/home/x/spm"));
         // An empty name is refused, which is how a status reaches the bar here.

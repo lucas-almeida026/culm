@@ -13,7 +13,9 @@ use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
 use culm::pty::SessionSpec;
 use culm::store::Store;
-use culm::testing::{FakeClock, FakeGit, FakeMemoryProbe, FakeRecapper, FakeSpawner, MemoryStore};
+use culm::testing::{
+    FakeClock, FakeGit, FakeHookListener, FakeMemoryProbe, FakeRecapper, FakeSpawner, MemoryStore,
+};
 use culm::ui::HitBox;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -79,6 +81,7 @@ struct Fakes {
     store: MemoryStore,
     clock: FakeClock,
     recapper: FakeRecapper,
+    hooks: FakeHookListener,
 }
 
 impl Fakes {
@@ -93,6 +96,7 @@ impl Fakes {
             store: MemoryStore::new(),
             clock: FakeClock::new(1_000),
             recapper: FakeRecapper::new(),
+            hooks: FakeHookListener::new(),
         }
     }
 
@@ -103,6 +107,7 @@ impl Fakes {
             store: &self.store,
             recapper: &self.recapper,
             clock: &self.clock,
+            hooks: &self.hooks,
         }
     }
 }
@@ -309,20 +314,20 @@ fn memory_is_sampled_for_every_running_session() {
 }
 
 #[test]
-fn a_tenth_active_session_is_refused() {
+fn a_ninth_active_session_is_refused() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    for n in 1..=9 {
+    for n in 1..=8 {
         app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
             .expect("session starts");
     }
-    assert_eq!(app.active_count(), 9);
+    assert_eq!(app.active_count(), 8);
 
-    app.create_session(&form("s10", [false, false]), &f.deps())
+    app.create_session(&form("s9", [false, false]), &f.deps())
         .expect("the call succeeds and refuses the session");
 
-    assert_eq!(app.active_count(), 9);
-    assert_eq!(f.spawner.count(), 9, "no tenth process is started");
+    assert_eq!(app.active_count(), 8);
+    assert_eq!(f.spawner.count(), 8, "no ninth process is started");
     assert!(app.status().contains("limit"));
 }
 
@@ -581,35 +586,6 @@ fn paste_reaches_the_focused_session_bracketed() {
         "\x1b[200~first\nsecond\nthird\x1b[201~",
         "three lines arrive as one block, not as three submissions"
     );
-}
-
-#[test]
-fn alt_digit_switches_the_visible_session() {
-    let f = Fakes::new();
-    let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
-        .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
-        .expect("two starts");
-
-    app.on_key(&key(KeyCode::Char('2'), KeyModifiers::ALT), &f.deps())
-        .expect("host key is handled");
-
-    assert_eq!(app.focused_entry(), Some(1));
-    assert_eq!(app.visible().map(culm::app::Entry::name), Some("two"));
-}
-
-#[test]
-fn a_digit_past_the_active_half_leaves_the_focus_alone() {
-    let f = Fakes::new();
-    let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
-        .expect("one starts");
-
-    app.on_key(&key(KeyCode::Char('5'), KeyModifiers::ALT), &f.deps())
-        .expect("host key is handled");
-
-    assert_eq!(app.focused_entry(), Some(0));
 }
 
 #[test]
@@ -1371,16 +1347,16 @@ fn the_shell_carries_no_culm_socket() {
 }
 
 #[test]
-fn the_shell_does_not_count_toward_the_nine_session_limit() {
+fn the_shell_does_not_count_toward_the_eight_session_limit() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    for n in 1..=9 {
+    for n in 1..=8 {
         app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
             .expect("session starts");
     }
 
-    assert_eq!(app.active_count(), 9);
-    assert_eq!(session_specs(&f).len(), 9);
+    assert_eq!(app.active_count(), 8);
+    assert_eq!(session_specs(&f).len(), 8);
     app.on_key(&key(KeyCode::Char('0'), KeyModifiers::ALT), &f.deps())
         .expect("alt+0 is handled");
     assert_eq!(app.focus(), Focus::Shell, "position 0 stays reachable");
@@ -2675,7 +2651,7 @@ fn resuming_a_session_moves_it_to_the_front_of_the_paused_list_when_it_pauses_ag
 }
 
 #[test]
-fn the_active_half_keeps_its_order_because_a_digit_addresses_it() {
+fn the_active_list_keeps_the_order_its_sessions_were_created_in() {
     let f = Fakes::new();
     let mut app = App::new(project());
     for (name, at) in [("alpha", 300), ("beta", 200), ("gamma", 100)] {
@@ -2947,7 +2923,7 @@ fn open_finds_the_project_under_its_new_name() {
     let outcome = cli(&f, &["culm", "open", "billing"]).expect("open succeeds");
 
     match outcome {
-        culm::cli::Outcome::Open(project) => assert_eq!(project.slug, "billing"),
+        culm::cli::Outcome::Open(plan) => assert_eq!(plan.projects[0].slug, "billing"),
         culm::cli::Outcome::Done => panic!("open must hand back a project"),
     }
     assert!(
@@ -3369,7 +3345,7 @@ fn restoring_past_the_active_limit_is_refused_and_keeps_the_session_archived() {
         .expect("old starts");
     keep_transcript(&f, &app, "old");
     app.archive_focused(&f.deps()).expect("old is archived");
-    for n in 1..=9 {
+    for n in 1..=8 {
         app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
             .expect("a session starts");
     }
@@ -3645,15 +3621,30 @@ fn a_paste_while_the_sidebar_holds_the_keys_reaches_no_child() {
 }
 
 #[test]
-fn alt_and_a_digit_give_the_keys_back_to_the_panel() {
+fn alt_zero_gives_the_keys_back_to_the_panel_on_the_shell() {
     let f = Fakes::new();
     let mut app = three_sessions(&f);
 
     press(&mut app, &f, alt_shift('O'));
-    press(&mut app, &f, key(KeyCode::Char('2'), KeyModifiers::ALT));
+    press(&mut app, &f, key(KeyCode::Char('0'), KeyModifiers::ALT));
 
     assert_eq!(app.pane(), Pane::Panel);
-    assert_eq!(app.visible().map(culm::app::Entry::name), Some("two"));
+    assert_eq!(app.focus(), Focus::Shell);
+}
+
+#[test]
+fn a_tab_digit_reaching_a_project_changes_nothing_in_it() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, key(KeyCode::Char('2'), KeyModifiers::ALT));
+
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
+    assert_eq!(
+        written(&f, "one"),
+        "",
+        "the digit is not the child's either"
+    );
 }
 
 #[test]
@@ -3846,19 +3837,6 @@ fn the_first_active_session_never_moves_above_the_shell() {
 }
 
 #[test]
-fn moving_an_active_session_changes_the_digit_that_reaches_it() {
-    let f = Fakes::new();
-    let mut app = two_lists(&f);
-    highlight(&mut app, &f, "a1");
-
-    press(&mut app, &f, shift(KeyCode::Down));
-    press(&mut app, &f, key(KeyCode::Char('2'), KeyModifiers::ALT));
-
-    assert_eq!(active_names(&app), ["a2", "a1", "a3"]);
-    assert_eq!(app.visible().map(culm::app::Entry::name), Some("a1"));
-}
-
-#[test]
 fn a_move_keeps_the_panel_on_the_session_it_showed() {
     let f = Fakes::new();
     let mut app = two_lists(&f);
@@ -3948,4 +3926,81 @@ fn a_new_pause_lands_on_top_and_leaves_the_hand_order_below_it() {
     app.toggle_pause(&f.deps()).expect("a2 pauses");
 
     assert_eq!(paused_names(&app), ["a2", "p1", "p3", "p2"]);
+}
+
+#[test]
+fn a_quit_kills_a_recap_that_is_still_running() {
+    let f = Fakes::new();
+    f.recapper.takes_passes(10_000);
+    let mut app = session_with_transcript(&f);
+    app.toggle_pause(&f.deps()).expect("one pauses");
+    assert_eq!(f.recapper.asked().len(), 1, "the recap started");
+
+    app.shutdown(&f.deps()).expect("the app closes");
+
+    assert_eq!(f.recapper.kills(), 1, "no recap child outlives culm");
+}
+
+#[test]
+fn a_project_saved_with_too_many_active_sessions_opens_the_extras_paused() {
+    let f = Fakes::new();
+    let mut saved = project();
+    saved.sessions = (1..=10)
+        .map(|n| record(&format!("s{n}"), SessionState::Active))
+        .collect();
+
+    let app = App::open(saved, &f.deps(), 20, 60);
+
+    assert_eq!(app.active_count(), 8);
+    assert_eq!(session_specs(&f).len(), 8, "only eight sessions started");
+    assert_eq!(paused_names(&app).len(), 2);
+    assert!(app.status().contains("limit"), "{}", app.status());
+}
+
+#[test]
+fn a_pointer_on_the_row_above_the_sidebar_leaves_the_keys_alone() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    let hit = HitBox {
+        panel: Rect::new(30, 1, 50, 20),
+        inner: culm::ui::inner_of(Rect::new(30, 1, 50, 20)),
+        ..sidebar_hit()
+    };
+
+    app.on_mouse(MouseEventKind::Moved, 5, 0, &hit, &f.deps());
+
+    assert_eq!(
+        app.pane(),
+        Pane::Panel,
+        "row 0 holds the tab bar, not the sidebar"
+    );
+}
+
+#[test]
+fn a_closing_project_restarts_no_shell() {
+    let f = Fakes::new();
+    f.spawner.children_ignore_terminate();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.begin_close(&f.deps());
+    let shell = f.spawner.spawn_named("shell").expect("the shell started");
+    shell.child.exit_on_its_own();
+    app.poll_close(&f.deps()).expect("a pass of the close");
+    let spawned = f.spawner.count();
+
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("the tick runs");
+
+    assert_eq!(f.spawner.count(), spawned, "no new shell was started");
+}
+
+#[test]
+fn a_session_created_while_the_shell_is_on_screen_takes_the_panel() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    assert_eq!(app.focus(), Focus::Shell);
+
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
 }

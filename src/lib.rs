@@ -1,9 +1,10 @@
-//! culm — many Claude Code sessions in one project, as vertical tabs.
+//! culm — many projects as tabs, and many Claude Code sessions in each.
 //!
 //! A grove of bamboo sends many culms up from one shared rhizome. Each stem stands
 //! on its own, and all of them are fed by the same root system.
 
 pub mod app;
+pub mod browser;
 pub mod cli;
 pub mod clipboard;
 pub mod clock;
@@ -21,3 +22,4 @@ pub mod store;
 pub mod testing;
 pub mod transcript;
 pub mod ui;
+pub mod workspace;

@@ -44,6 +44,9 @@ pub trait Store: fmt::Debug {
     /// The settings that apply to every project. A missing file reads as defaults.
     fn load_config(&self) -> Result<crate::config::Config>;
     fn save_config(&self, config: &crate::config::Config) -> Result<()>;
+    /// Every workspace. A missing file reads as none.
+    fn load_workspaces(&self) -> Result<crate::workspace::Workspaces>;
+    fn save_workspaces(&self, workspaces: &crate::workspace::Workspaces) -> Result<()>;
 }
 
 /// Reads and writes real files under the state directory.
@@ -99,6 +102,10 @@ impl FsStore {
         self.state_dir.join("registry.json")
     }
 
+    fn workspaces_path(&self) -> PathBuf {
+        self.state_dir.join("workspaces.json")
+    }
+
     fn project_path(&self, slug: &str) -> PathBuf {
         self.state_dir.join("projects").join(format!("{slug}.json"))
     }
@@ -129,6 +136,17 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T>
 impl Store for FsStore {
     fn load_registry(&self) -> Result<Registry> {
         read_json(&self.registry_path())
+    }
+
+    fn load_workspaces(&self) -> Result<crate::workspace::Workspaces> {
+        read_json(&self.workspaces_path())
+    }
+
+    fn save_workspaces(&self, workspaces: &crate::workspace::Workspaces) -> Result<()> {
+        write_atomic(
+            &self.workspaces_path(),
+            &serde_json::to_vec_pretty(workspaces)?,
+        )
     }
 
     fn save_registry(&self, registry: &Registry) -> Result<()> {
@@ -339,6 +357,23 @@ mod tests {
 
         assert_eq!(loaded, project);
         assert!(store.load_project("absent").expect("load").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn workspaces_survive_a_round_trip_and_a_missing_file_reads_as_none() {
+        let root = temp_dir("workspaces");
+        let store = store_at(&root);
+        assert_eq!(
+            store.load_workspaces().expect("load"),
+            crate::workspace::Workspaces::default()
+        );
+        let mut all = crate::workspace::Workspaces::default();
+        all.create("work", &["api".to_string(), "web".to_string()])
+            .expect("created");
+        store.save_workspaces(&all).expect("save");
+
+        assert_eq!(store.load_workspaces().expect("load"), all);
         std::fs::remove_dir_all(&root).ok();
     }
 }

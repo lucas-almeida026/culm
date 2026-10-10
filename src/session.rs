@@ -39,7 +39,7 @@ impl Session {
     /// Starts a session and the thread that drains it.
     ///
     /// The drain thread runs for every session, visible or not. An undrained
-    /// pseudoterminal fills its buffer and the child blocks. See FINDINGS.md.
+    /// pseudoterminal fills its buffer and the child blocks.
     pub fn spawn(spawner: &dyn PtySpawner, spec: &SessionSpec) -> Result<Self> {
         let spawned = spawner.spawn(spec)?;
         let mut reader = spawned.reader;

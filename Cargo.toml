@@ -2,7 +2,7 @@
 name = "culm"
 version = "0.1.1"
 edition = "2024"
-description = "A terminal application that runs many Claude Code sessions in one project, as vertical tabs."
+description = "A terminal application that opens many projects as tabs, and runs many Claude Code sessions in each."
 license = "Unlicense"
 repository = "https://github.com/lucas-almeida026/culm"
 readme = "README.md"
