@@ -1,103 +1,137 @@
 # culm
 
-Many Claude Code sessions in one project, as vertical tabs. One visible at a time. All of them running.
+**Every Claude Code session you run, in one window.** Open your projects as tabs, run many sessions in each, and see at a glance which one needs you.
 
 A grove of bamboo sends many culms up from one shared rhizome. Each stem stands on its own, and all of them are fed by the same root system.
 
-## Why it exists
+- **Projects as tabs.** Up to eight projects in one window, like a browser. A workspace reopens the whole set with one command.
+- **Many sessions per project.** One session per feature, all running at once, one on screen. Each session is a real, fully interactive Claude Code terminal.
+- **Know who needs you.** 🔐 needs a permission, ❓ needs an answer, ✅ finished. Every session shows its marker, and every tab shows the most urgent one inside it.
+- **Nothing gets lost.** Close culm, reboot, come back: every session resumes its whole conversation.
+- **Built for multi-repository work.** A project is any directory. Repositories join it from anywhere, and a session reaches all of them. Each session that edits a repository gets its own git worktree and branch, so parallel sessions never collide.
 
-The author works on several features per week and uses one Claude Code session per feature. Those sessions live across seven repositories that belong to one project. Three problems drove this:
+## Install
 
-**Sessions are hard to reach.**
+Requirements: Linux, `git`, and the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code).
 
-**A terminal multiplexer is the wrong shape.** tmux keeps sessions alive, but it manages windows, not projects. It knows nothing about which session needs attention, which repository a session belongs to, or how to resume a transcript.
+Download the latest release from the [releases page](https://github.com/lucas-almeida026/culm/releases/latest).
 
-**Existing tools bind a session to one repository.** [claude-squad](https://github.com/smtg-ai/claude-squad) requires a git repository at the working directory and gives each session a worktree. A project that spans seven repositories does not fit that model, and neither does a session that edits two repositories at once.
-
-culm treats the project as the unit. A project is any directory. Repositories join a project, including repositories outside the project directory. A session reaches every repository in its project.
-
-## How it works
-
-**One process, no daemon.** Every session is a real child process on its own pseudoterminal, opened with `portable-pty`. culm owns every one of them. Nothing survives the interface exiting, and nothing else supervises them.
-
-**Every session is drained, visible or not.** Each session runs a thread that reads its pseudoterminal and feeds a `vt100` parser holding two thousand lines of scrollback. This is not an optimization: an undrained pseudoterminal fills its buffer and the child blocks, which looks exactly like a hung background session. Drawing a frame copies the focused session's screen into a ratatui buffer, so switching tabs is a change of which screen gets copied and costs nothing.
-
-**The loop reads input first.** A keystroke never waits behind a frame. Hook messages come next, then a once-a-second pass that samples memory and reaps a child that ended, then a redraw capped at one per eight milliseconds so a session printing at full speed cannot drive the render.
-
-**Transcripts stay where Claude Code puts them.** culm generates a UUID and passes `--session-id` the first time a session starts, then `--resume <uuid>` every time after, which reloads the whole conversation. The transcript itself lives at `~/.claude/projects/<cwd with every / and . turned into ->/<uuid>.jsonl`, written by the CLI. culm reads those files to import a session and deletes one when you delete its session, and never moves or rewrites them.
-
-**Pausing is a signal, not a save.** A pause sends SIGTERM to the child and keeps the session id. Resuming spawns a fresh `claude --resume` against the same id, so the conversation comes back and the memory does not stay held.
-
-**Attention markers arrive over a socket.** `culm hooks install` adds entries to `~/.claude/settings.json` that point nine hook events back at the culm binary. Each session culm starts carries `CULM_SOCKET` in its environment; when a hook fires, the short-lived `culm hook` process posts one JSON payload to that Unix socket and the interface marks the matching session. A `claude` you start yourself has no `CULM_SOCKET`, so its hooks exit quietly. culm never reads a session's terminal output to decide anything.
-
-One gap is worth knowing: no hook reports that you answered a permission prompt, so `🔐` would otherwise stay up for the whole time the approved tool runs. The keystroke that answers the prompt is the only signal culm gets, so that keystroke clears the marker. Merely looking at a session never clears one.
-
-**Worktrees are the only version control work.** A session that edits a repository gets `git worktree add -b <session-slug>` under `<project root>/.worktrees/<repo>-<session>`, so two sessions editing one repository do not collide. culm creates worktrees and removes them. It never commits, never pushes, and never deletes a branch.
-
-**State is two JSON files.** A global `registry.json` lists every project, and `projects/<slug>.json` holds one project's root, repositories, and session records, both under `$XDG_STATE_HOME/culm` (or `~/.local/state/culm`). A record is a session id, a name, its repositories, and when it was last used — never the conversation, which is the transcript's job. A small `view` block beside them remembers the sidebar width. Every write goes to a temporary file and is renamed into place, so an interrupted write cannot truncate saved state.
-
-**The shell at position 0 is the same machinery.** It spawns `$SHELL` at the project root through the same pseudoterminal code, minus the session id, the marker, the worktree, and `CULM_SOCKET`. It is not saved, it does not count toward the nine-session limit, and it restarts on the next tick if you exit it.
-
-**Keys go through one translation table.** culm asks the terminal for the kitty keyboard protocol and uses it when the answer is yes, because it reports a modified key as a single unambiguous event. A terminal that says no runs the legacy path instead; the protocol is an enhancement and never a requirement. The bottom bar names which mode you got.
-
-**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 349 cases without starting a process, touching disk outside a temporary directory, or sleeping.
-
-## What it is
-
-One Rust binary, for Linux. Early, and in use daily. The configuration file holds one setting so far; key bindings are still fixed in the binary.
-
-Register a project and open it:
+On Debian or Ubuntu:
 
 ```
-culm hooks install                 # once, so attention markers work
-culm project new <path>            # register a directory, named after its last part
-culm project new <path> --name <name>
-                                   # register it under a name you choose
-culm project alter name <name>     # rename it, so culm open <name> works
-culm project new <path> --import-native-sessions
-                                   # register it and pull in the sessions it holds
-culm project repo add <path>       # add a git repository to it
-culm project repo list             # show the repositories it holds
-culm project import                # pull in sessions that appeared since
-culm                               # open the project that owns this directory
-culm open --import-native-sessions # import, then open
-culm project rm <project>          # unregister it, never deletes source or branches
-culm config list                   # settings that apply to every project
-culm config set recap-on-pause true
-                                   # keep a recap of what a session was doing
+sudo apt install ./culm_<version>-1_amd64.deb
 ```
 
-A project name becomes a slug, so `--name "Billing Rewrite"` gives you `culm open billing-rewrite`. A name another project already holds is refused rather than numbered. A rename moves the saved state and keeps the root, the repositories, and every session.
+On any other distribution:
 
-An import keeps the session id of each transcript, so resuming one reaches the same conversation. It takes the name from the title the session carries inside Claude Code. A session that was never named there is named by a headless `claude -p --model haiku` child reading the first prompt. Every imported session arrives paused.
+```
+tar xzf culm-v<version>-x86_64-unknown-linux-musl.tar.gz
+install -m 755 culm-v<version>-x86_64-unknown-linux-musl/culm ~/.local/bin/culm
+```
 
-Inside the interface, `Alt+Shift+H` shows the table of every binding. The bottom bar points at it against the left edge at all times, names the keyboard mode the host terminal gave culm, and puts whatever last happened against the right edge. In short: `Alt+0` focuses the shell, `Alt+<1-9>` focuses an active session, `Alt+Shift+N` creates one, `Alt+Shift+P` pauses or resumes the focused session, `Alt+Shift+R` renames it, `Alt+Shift+F` searches the paused list, `Alt+Shift+X` deletes a paused one after a yes or no confirmation, `Alt+Shift+A` archives the focused session, `Alt+Shift+L` lists the archive, `Alt+Shift+O` moves the keys between the sidebar and the panel, `Alt+Shift+D` toggles nerd mode, `Alt+Shift+S` opens the settings, `Ctrl+q` quits. A quit shows a spinner while the sessions leave, and pressing it again stops waiting and kills them — the next open says so for a few seconds. A click focuses any row, and the separator drags to resize the sidebar between 20 and 60 columns. Each project remembers the width it was left at and opens there again.
+Then turn on the attention markers, once:
 
-Switch on `recap-on-pause` and a session says what it was doing when you come back to it. Pausing runs a headless `claude -p --no-session-persistence --resume <id> /recap` once the child is gone, and the answer sits above `paused` in the panel. That flag matters: without it the resume would append to the real transcript. The recap is skipped when nothing reached the session since the last one, so an idle pause costs nothing, and it is off by default because every other pause costs a call to the model.
+```
+culm hooks install
+```
 
-The sidebar and the panel take the keys in turn. The half that holds the keys has a cyan border, and the other half is dimmed. The keys follow the mouse: moving or dragging over a half gives that half the keys. `Alt+Shift+O` moves them without the mouse. While the sidebar holds the keys, `Up` and `Down`, or `k` and `j`, move a highlight, `Enter` shows the highlighted session and gives the keys back to the panel, and `Esc` gives them back with no change. `/` or any other letter starts the paused search. No key and no paste reaches a session while the sidebar holds the keys. `Shift+Up` and `Shift+Down`, or `K` and `J`, move the highlighted session up or down its own list. A move stops at the border of the list, so a session never changes list this way. Moving an active session changes the digit that reaches it. culm saves the order, and the order survives a restart.
+## Quick start
 
-The archive holds the sessions you want out of the way. `Alt+Shift+A` stops the focused session, active or paused, and moves it to the archive. An archived session has no row in the sidebar, and the paused search does not find it. Archiving never takes a recap, whatever `recap-on-pause` says. `Alt+Shift+L` opens the archive list, newest first, with a search box of its own. `Enter` or `Alt+Shift+A` restores the highlighted session to the list it left: a session that was active resumes its conversation, and a session that was paused stays paused. If the transcript of the session no longer exists, culm removes the session from the archive and the list says why. The worktrees and the branch stay on disk.
+1. Register a project. Any directory works:
 
-A session that pauses goes to the top of the paused list, so an untouched list reads newest first. `Alt+Shift+F` puts the cursor in the search box above it, which filters by name on every keystroke. `Enter` lands on the first match, and `Esc` clears the filter.
+   ```
+   culm project new ~/work/billing
+   ```
 
-Drag over a panel to select, and the text reaches the system clipboard when the button comes up. A middle click pastes the last copy into the focused session. An alt click extends the selection to a new point, keeping the anchor, so a block longer than the panel is copied in two gestures. Alt rather than shift, because a terminal keeps shift and the mouse for its own selection even while an application holds the mouse.
+2. Add the repositories its sessions edit, from anywhere on disk:
 
-Scrolling keeps the selection on the text it marks. When culm owns the scrollback it knows exactly how far the view went. A session that scrolls itself, such as Claude Code, repaints its own panel instead and reports nothing, so culm hashes the rows before the notch and lines them up against the rows that arrive after, then moves the marks by that distance. A repaint that does not line up was a new screen rather than a scroll, and the selection is dropped. Such a session keeps its own history, so text that scrolls off its panel is gone as far as culm is concerned and cannot be copied back.
+   ```
+   culm project repo add ~/work/billing/api
+   culm project repo add ~/src/shared-lib
+   ```
 
-The mouse wheel over a panel scrolls. A session that handles the mouse itself, such as Claude Code, receives the notch and scrolls its own conversation. For a plain shell, culm scrolls its own buffer instead, `Shift+PageUp` and `Shift+PageDown` move half a panel, and typing returns the view to the live output.
+3. Already have Claude Code sessions in that directory? Bring them in:
 
-## Build
+   ```
+   culm project import
+   ```
+
+4. Open it:
+
+   ```
+   cd ~/work/billing && culm
+   ```
+
+5. Press `Alt+Shift+N`, name the session, pick its repositories, and press `Enter`. Repeat for every feature you work on.
+
+Press `Alt+Shift+H` inside culm at any time for every shortcut.
+
+## Work on several projects
+
+Open more than one project, one tab each:
+
+```
+culm open billing crm
+```
+
+Save a set you open often as a workspace, and reopen it in one command:
+
+```
+culm workspace new daily billing crm
+culm open -w daily
+```
+
+Opened several projects without a workspace? culm offers to save them as one when you quit.
+
+## Shortcuts
+
+| Keys | Does |
+| --- | --- |
+| `Alt+1` to `Alt+8` | Switch project tab |
+| `Alt+Shift+T` / `Alt+Shift+W` | Open a project tab / close this tab |
+| `Alt+Shift+N` | New session |
+| `Alt+Shift+P` | Pause or resume the session |
+| `Alt+Shift+R` | Rename the session |
+| `Alt+Shift+A` / `Alt+Shift+L` | Archive the session / list the archive |
+| `Alt+Shift+X` | Delete a paused session |
+| `Alt+Shift+F` | Search paused sessions |
+| `Alt+Shift+O` | Move the keys between the sidebar and the session |
+| `j` `k` / `Enter` | In the sidebar: move / open the session |
+| `J` `K` | In the sidebar: reorder sessions |
+| `Alt+0` | The project's shell |
+| `Alt+Shift+S` | Settings |
+| `Ctrl+q` | Quit |
+
+The mouse works too: click a tab or a session, drag to select and copy, middle click to paste, and scroll with the wheel.
+
+## Tips
+
+- **Pause what you are not using.** A paused session frees its memory and resumes with its whole conversation. A project runs up to eight sessions at a time.
+- **Get a recap when you come back.** Run `culm config set recap-on-pause true`, and a paused session tells you what it was doing.
+- **Archive the done work.** Archived sessions leave the sidebar but stay one keystroke away in the archive list.
+- **Each session has its own branch.** culm creates a worktree per session and per repository, and never commits, pushes, or deletes a branch for you.
+
+## Command line
+
+```
+culm project list                       # every registered project
+culm project alter name <name>          # rename the project in this directory
+culm project rm <project>               # unregister it, never deletes source or branches
+culm workspace list                     # every workspace and its projects
+culm workspace add <name> <project>     # add a tab to a workspace
+culm workspace remove <name> <project>  # take a tab out of a workspace
+culm config list                        # settings for every project
+```
+
+`culm --help` and `culm <command> --help` list the rest.
+
+## Build from source
 
 ```
 cargo build --release
 cargo test
 ```
 
-Linux only. Other systems may work, and no test covers them.
+## License
 
-The requirements live in [session-manager-spec.md](session-manager-spec.md), and the working rules live in [CLAUDE.md](CLAUDE.md).
-
-## Contribution
-
-Public domain under the [Unlicense](UNLICENSE). The project is closed to contributions. Fork it and make it yours.
+Public domain, under the [Unlicense](UNLICENSE). The project is closed to contributions. Fork it and make it yours.

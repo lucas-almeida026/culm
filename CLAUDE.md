@@ -2,57 +2,88 @@
 
 A grove of bamboo sends many culms up from one shared rhizome. Each stem stands on its own. All of them are fed by the same root system.
 
-## What this is
+culm is a terminal application. It opens up to eight projects in one window, as tabs along the top. Each project runs many Claude Code sessions and lists them in its own sidebar. One session is visible at a time. Every session keeps running whether or not it is visible.
 
-culm is a terminal application. It runs many Claude Code sessions inside one project and shows them as vertical tabs. One session is visible at a time. Every session keeps running whether or not it is visible.
+[ARCHITECTURE.md](ARCHITECTURE.md) explains how the parts fit together, and the assumptions the code makes without saying so. Read it before a change that crosses modules.
 
-## Why it exists
+## Vision
 
-The author works on several features per week, and uses one Claude Code session per feature. Those sessions live across seven repositories that belong to one project. Three problems drove this project:
+culm is the place where a developer runs every Claude Code session of the week, and never loses one.
 
-1. **Sessions are hard to reach.** A parked session is a UUID in `~/.claude/projects/`. Finding the right one means reading transcripts.
-2. **A terminal multiplexer is the wrong shape.** tmux keeps sessions alive, but it manages windows, not projects. It knows nothing about which session needs attention, which repository a session belongs to, or how to resume a transcript.
-3. **Existing tools bind a session to one repository.** claude-squad requires a git repository at the working directory and gives each session a git worktree. A project that spans seven repositories does not fit that model, and neither does a session that edits two repositories at once.
+The author works on several features per week, with one Claude Code session per feature, across many repositories. culm exists for that workflow first. The source is public so that others can fork it. A request from outside never changes the direction.
 
-culm treats the project as the unit. A project is any directory. Repositories join a project, including repositories outside the project directory. A session reaches every repository in its project.
+## Goals
 
-## What it does
+These goals decide between two designs. A change that serves none of them needs a reason.
 
-- Runs many sessions at once. Shows one. Keeps parsing the rest, because an undrained pseudoterminal blocks its child.
-- Renders the focused session as a full interactive terminal panel. Every key reaches the child unchanged, including `shift+tab`, `Ctrl+r`, `Esc`, and a bracketed paste.
-- Resumes an existing session with `claude -r`, which reloads the whole transcript.
-- Marks a session that needs attention, from Claude Code hooks: needs permission, needs an answer, or finished. A marker clears when the user resolves the issue, and never when the user merely looks at the session.
-- Creates a git worktree and a branch for a session that edits a repository, so that two sessions editing one repository do not collide.
-- Saves state on close and restores it on open, so that a reboot costs nothing.
+1. **Zero-cost context switching.** A switch between features, sessions, and projects costs nothing. No state is lost, no transcript is hunted for, and a reboot costs only the restart.
+2. **Attention, not polling.** The user never checks a session to learn whether it needs them. culm marks the session and its tab.
+3. **TUI over GUI.** culm stays a terminal application. A feature that needs a graphical window is out of scope.
+4. **Full CLI compatibility.** This goal has two halves:
+   - Claude Code works unchanged inside a session. Every key, paste, mouse event, slash command, and model switch behaves as it does in a plain terminal.
+   - culm is fully scriptable. Every operation on projects, repositories, workspaces, and settings is reachable from the culm command line, not only from the interface.
+5. **Fast enough to forget.** Frame render p99 stays under 16 ms. Key to echo stays under 30 ms. These two numbers are the only performance targets.
 
-Full requirements live in `./session-manager-spec.md`. Evidence for the architecture lives in [FINDINGS.md](FINDINGS.md), which records a spike that proved the stack on 2026-09-06.
+## Road to v1.0
+
+culm stays below v1.0 until every item below holds:
+
+1. **Stable saved state.** The state files keep a format that culm promises to read forever. A format change ships with a migration, never with a break.
+2. **Configurable keys.** Every binding lives in the configuration file, and one binding is replaceable without restating the rest.
+3. **Crash survival.** Sessions survive an unexpected exit of the interface.
+4. **Daily-driver complete.** The author's daily workflow needs no further change to culm.
+5. **Terminal support.** culm works in common terminals other than kitty.
+6. **Planned providers.** A plan exists for agent CLIs other than Claude Code. Before v1.0, culm supports Claude Code only.
+7. **Planned platforms.** A plan exists for other systems, in this order: other Linux distributions, then macOS, then Windows. Windows is a distant option, not a goal.
+
+## Platforms
+
+culm targets Debian-based Linux distributions. The release ships a `.deb` and a static musl binary. Other systems may work. No test and no release covers them.
 
 ## Not in scope
 
 - Git diff, commit, and push. Worktree and branch management is the only version control work.
 - Automatic acceptance of permission prompts.
 - Any change to where the Claude Code CLI writes transcripts.
-- Any target other than Linux. Other systems may work. No test covers them.
+- A graphical interface.
+- Agent CLIs other than Claude Code, before v1.0.
 
-## Contribution
+## Decisions, and why
 
-The source is public domain under the Unlicense. The project is closed to contributions. Fork it and make it yours.
+| Decision | Why |
+| --- | --- |
+| The project is the unit, and a project is any directory. | The author's projects span many repositories. A tool that binds a session to one git repository does not fit. |
+| A session reaches every repository of its project. | One feature often edits two repositories at once. |
+| One git worktree and one branch per session per repository. | Two sessions that edit one repository must not collide. |
+| One window holds up to eight projects as tabs. | A browser is the familiar model for many open things, one visible. Eight keeps one digit per tab. |
+| One process, no daemon. | One process is simple to reason about and to test. Crash survival is deferred, not refused. It is a v1.0 item. |
+| culm owns every pseudoterminal and parses every session with `vt100`. | culm must render a session inside its own layout, and keep every session drained. |
+| Attention markers come from Claude Code hooks over a Unix socket. | Reading terminal output to guess a state is fragile. Hooks report the state directly. |
+| Sessions resume with `claude --resume`. | Claude Code keeps the transcript. culm keeps only the session id, so no conversation is duplicated. |
+| State lives in small JSON files under the XDG state directory. | The files are easy to read, to repair by hand, and to write atomically. |
+| `Alt` is the only leader key. No function key is reserved. | Every reserved key is a key Claude Code loses. |
+| Workspaces name sets of projects. | Reopening the same set of projects every day must cost one command. |
+| The project is closed to contributions. | culm serves one workflow. A fork serves another. |
 
----
+## How to work in this repository
 
-# How to work in this repository
-
-## Order of work
+### Order of work
 
 Make it work. Make it right. Make it fast. In that order, and never skip forward.
 
 1. **Make it work.** Write the smallest version that produces the real behavior end to end. A skeleton that runs beats a design that does not.
 2. **Make it right.** Add the tests, name things properly, push side effects to the edges, and delete what the working version proved unnecessary.
-3. **Make it fast.** Only after a measurement shows a real cost. `FINDINGS.md` holds the budgets: frame render p99 under 16 ms, key to echo under 30 ms. Do not optimize without a number.
+3. **Make it fast.** Only after a measurement shows a real cost against the budgets in the goals. Do not optimize without a number.
 
 A commit that jumps to step 3 without a measurement is a defect.
 
-## Rust practice
+### Branches
+
+- Develop on a branch named after the next version, such as `v0.3.0`. The project runs no parallel development, so use no worktree for culm itself.
+- A branch name equals the tag name of its release. Push a tag by its full ref name, `refs/tags/vX.Y.Z`, and delete a branch by `refs/heads/vX.Y.Z`. A short name is ambiguous, and git refuses it.
+- Commit and push only when the maintainer approves the change.
+
+### Rust practice
 
 - Target Rust edition 2024. Format with `cargo fmt`. The repository holds `rustfmt.toml`.
 - `unsafe` is forbidden. `Cargo.toml` sets `unsafe_code = "forbid"` under `[lints.rust]`, so the compiler rejects it.
@@ -63,50 +94,80 @@ A commit that jumps to step 3 without a measurement is a defect.
 - Write identifiers in English. Write comments that explain why, not what. Do not narrate a change in a comment, because git already holds that history.
 - Document a public item when its purpose is not obvious from its name.
 
-## Dependency injection
+### Dependency injection
 
-Every side effect enters through a trait. This is what makes the tests fast and deterministic.
+Every side effect enters through a trait. The tests are fast and deterministic because of this rule.
 
-- `PtySpawner` in `src/pty.rs` is the process boundary. `SystemPtySpawner` starts a real child. `FakeSpawner` in `src/testing.rs` replays canned bytes and records what was written.
-- A type receives its dependencies through its constructor or through the call. `App::add_session` takes `&dyn PtySpawner` for that reason.
+- `Deps` in `src/app.rs` carries every side effect a project needs: `PtySpawner`, `Git`, `Store`, `Clock`, `Recapper`, and `HookListener`. Pass `Deps` at the call. Never store it.
+- Each trait has a real implementation and a fake in `src/testing.rs`.
 - No global state, no singleton, no lazily initialized handle to the operating system.
 - Core logic never calls `std::process`, `std::fs`, or `std::time::SystemTime` directly. When a new side effect appears, add a trait for it, add a fake, and inject both.
 - Prefer a generic parameter when the type is known at compile time. Use `&dyn Trait` when a collection holds several implementations.
 
-## Tests
+### Tests
 
-- Run `cargo test` before every commit. Run `cargo clippy --all-targets` as well.
+- Run `cargo test` and `cargo clippy --all-targets` before every commit.
 - Put unit tests beside the code in a `#[cfg(test)] mod tests`. Put behavior that crosses modules in `tests/`.
 - Name a test after the behavior it protects. `keys_reach_the_visible_session_only` states a rule. `test_keys` states nothing.
 - Use fakes, not mocks. Assert on the result, not on the sequence of calls.
 - Never sleep for a fixed period. Poll for the condition with a timeout, as `Session::wait_for_text` does.
 - A test never starts a real process, and never writes outside a temporary directory.
 - Every fixed bug gets a test that fails without the fix.
-- Terminal rendering that needs a real terminal is tested by hand. Record what was checked in `FINDINGS.md`, and mark it as manual.
 
-## Commits
+### Test by hand
+
+Behavior that needs a real terminal is tested by hand, by the maintainer.
+
+1. Close the running culm.
+2. Run `cargo build --release` in the repository.
+3. Start culm again, and check the change.
+
+Never test a new build inside a running culm. The older culm can mask or distort the result.
+
+### Commits
 
 Write one line in conventional commit form. No body. For example, `feat: switch sessions with a sidebar click`.
 
-## Layout
+### Human-facing documents
 
-| Path | Holds |
-| --- | --- |
-| `src/main.rs` | Terminal setup, the event loop, and teardown. Nothing else. |
-| `src/lib.rs` | The module list. |
-| `src/app.rs` | Application state, focus, and key dispatch. No input and no output. |
-| `src/session.rs` | One session: its child, its screen, and the thread that drains it. |
-| `src/pty.rs` | The process boundary. `SessionSpec`, `Pty`, and `PtySpawner`. |
-| `src/keys.rs` | Key translation. Pure functions, fully unit tested. |
-| `src/ui.rs` | Rendering, and the hit box that maps a click back to a session. |
-| `src/testing.rs` | Test doubles, compiled into the library so `tests/` can use them. |
-| `tests/` | Behavior that crosses modules, driven through the fakes. |
+Write `ARCHITECTURE.md`, `CHANGELOG.md`, release notes, and this file in Simplified Technical English: short active sentences, present tense, absolute dates, and evidence for every claim. `README.md` is the exception. It is a pitch and a quick start, so it explains no decision and no internal design.
+
+### Versions
+
+- Follow semantic versioning. A feature raises the minor version. A fix raises the patch version.
+- Record every change under `[Unreleased]` in `CHANGELOG.md`, in the commit that makes the change.
+- `Cargo.toml` holds the version. Raise it only in the release commit.
+
+### Release
+
+Follow these steps for version `X.Y.Z`, on the branch `vX.Y.Z`:
+
+1. Set `version` in `Cargo.toml` to `X.Y.Z`, and run `cargo build` to update `Cargo.lock`.
+2. Rename `[Unreleased]` in `CHANGELOG.md` to `[X.Y.Z] - <date>`, and add its compare link.
+3. Commit `chore: release X.Y.Z`. Push the branch.
+4. Fast-forward `main`: `git checkout main`, `git merge --ff-only vX.Y.Z`, `git push origin main`.
+5. Tag the commit: `git tag -a vX.Y.Z -m "culm vX.Y.Z"`, then `git push origin refs/tags/vX.Y.Z`.
+6. Build the binary: `cargo build --release --target x86_64-unknown-linux-musl`. Copy it out of `target/` and run `strip` on the copy.
+7. Make the tarball. Put the binary, `README.md`, and `UNLICENSE` in a directory named `culm-vX.Y.Z-x86_64-unknown-linux-musl`, then run `tar czf` on that directory.
+8. Make the `.deb` by hand with `dpkg-deb`:
+   1. Unpack the previous release's `.deb` with `dpkg-deb -R`, to reuse its `DEBIAN/control` and `usr/share/doc/culm/copyright`.
+   2. Lay out `usr/bin/culm`, `usr/share/doc/culm/README.md.gz` (from `gzip -9n`), and the copyright file.
+   3. Set `Version: X.Y.Z-1` and `Installed-Size` (from `du -sk`) in `DEBIAN/control`.
+   4. Run `dpkg-deb --root-owner-group -Zxz --build <dir> culm_X.Y.Z-1_amd64.deb`.
+9. Write one `.sha256` file per asset with `sha256sum`.
+10. Write the release notes in Simplified Technical English, in the layout of the previous release: install, the binary with its checksums, added, fixed, and known limits.
+11. Publish: `gh release create vX.Y.Z --verify-tag --title "culm vX.Y.Z" --notes-file <notes> --latest <assets>`.
+12. Download the published assets with `gh release download`, and run `sha256sum -c` on them.
+13. Delete the merged branch: `git branch -d vX.Y.Z` and `git push origin --delete refs/heads/vX.Y.Z`. Create the branch of the next version from `main`.
+
+Do not run `cargo build --release` while the maintainer uses culm from `target/release/culm`, unless the maintainer asks. That build replaces the binary the maintainer runs.
 
 ## Traps already paid for
 
-These cost time once. `FINDINGS.md` holds the detail.
+These cost time once. `ARCHITECTURE.md` explains each one.
 
 - `vt100` resize lives on the screen. Call `parser.screen_mut().set_size(rows, cols)`.
 - Drop the pseudoterminal slave right after spawning, or the master never reaches end of file.
 - Drain every session, always. An undrained pseudoterminal fills and the child blocks. The symptom looks like a hung background session.
 - Use the `ratatui::crossterm` re-export. A separate `crossterm` dependency risks a version skew.
+- Never draw text in one of the sixteen theme colors on a fill in another. A theme may give both the same value, and gruvbox does.
