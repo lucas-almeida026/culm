@@ -813,6 +813,7 @@ const WARN_SHORT: &str = "markers off";
 const SHORTCUTS: [(&str, &str); 21] = [
     ("Alt+1 to Alt+8", "focus a project tab"),
     ("Alt+Shift+T, W", "open a project tab, close this tab"),
+    ("Alt+Shift+←/→, drag", "move this tab left or right"),
     ("Alt+0", "show this project's shell"),
     ("Alt+Shift+N", "create a session"),
     ("Alt+Shift+P", "pause or resume the focused session"),
@@ -831,8 +832,7 @@ const SHORTCUTS: [(&str, &str); 21] = [
         "in the sidebar: reorder within its list",
     ),
     ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
-    ("Alt+Shift+H", "this table"),
-    ("Alt+Shift+S", "settings for every project"),
+    ("Alt+Shift+H, S", "this table, settings for every project"),
     ("Ctrl+q", "quit"),
     ("Shift+PageUp/Down", "scroll half a panel"),
     ("wheel", "scroll, or reach a mouse-aware child"),

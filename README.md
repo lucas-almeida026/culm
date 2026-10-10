@@ -89,6 +89,7 @@ Opened several projects without a workspace? culm offers to save them as one whe
 | --- | --- |
 | `Alt+1` to `Alt+8` | Switch project tab |
 | `Alt+Shift+T` / `Alt+Shift+W` | Open a project tab / close this tab |
+| `Alt+Shift+←` / `Alt+Shift+→` | Move this tab left / right (or drag it) |
 | `Alt+Shift+N` | New session |
 | `Alt+Shift+P` | Pause or resume the session |
 | `Alt+Shift+R` | Rename the session |

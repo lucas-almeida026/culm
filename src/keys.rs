@@ -30,6 +30,8 @@ pub enum HostAction {
     TogglePane,
     NewTab,
     CloseTab,
+    MoveTabLeft,
+    MoveTabRight,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -56,6 +58,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         return None;
     }
     match k.code {
+        KeyCode::Left if shift => Some(HostAction::MoveTabLeft),
+        KeyCode::Right if shift => Some(HostAction::MoveTabRight),
         KeyCode::Char('0') => Some(HostAction::FocusShell),
         KeyCode::Char(c @ '1'..='8') => Some(HostAction::FocusTab(c as usize - '1' as usize)),
         KeyCode::Char('N') => Some(HostAction::NewSession),
@@ -370,6 +374,25 @@ mod tests {
             None,
             "Alt+w stays with the child"
         );
+    }
+
+    #[test]
+    fn alt_shift_arrows_move_the_tab_and_other_arrows_stay_with_the_child() {
+        let shifted = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert_eq!(
+            host_action(&key(KeyCode::Left, shifted)),
+            Some(HostAction::MoveTabLeft)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Right, shifted)),
+            Some(HostAction::MoveTabRight)
+        );
+        assert_eq!(
+            host_action(&key(KeyCode::Left, KeyModifiers::ALT)),
+            None,
+            "Alt+Left moves a word in a shell"
+        );
+        assert_eq!(host_action(&key(KeyCode::Left, KeyModifiers::SHIFT)), None);
     }
 
     #[test]

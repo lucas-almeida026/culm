@@ -936,7 +936,13 @@ impl App {
             Some(HostAction::Quit) => self.request_close(deps),
             // Tabs are the browser's business, not a project's. A project that
             // receives one of these keys does nothing with it.
-            Some(HostAction::FocusTab(_) | HostAction::NewTab | HostAction::CloseTab) => {}
+            Some(
+                HostAction::FocusTab(_)
+                | HostAction::NewTab
+                | HostAction::CloseTab
+                | HostAction::MoveTabLeft
+                | HostAction::MoveTabRight,
+            ) => {}
             Some(HostAction::NewSession) => self.open_form(),
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,

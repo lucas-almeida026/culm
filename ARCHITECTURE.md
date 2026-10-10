@@ -121,7 +121,7 @@ Each project has two panes: the sidebar and the panel. One pane holds the keys.
 
 culm turns on full mouse reporting, so the terminal reports every move.
 
-- **Tab bar:** a press on a tab focuses the tab. Every other event goes to the focused project, a release over the tab bar included, so a drag never stays half done.
+- **Tab bar:** a press on a tab focuses the tab and picks it up. A drag then carries the tab past every tab it crosses, by column only, until the release. Every other event goes to the focused project, a release over the tab bar included, so a drag inside a project never stays half done.
 - **Selection:** a drag over the panel selects cells, and the release copies them through OSC 52. culm draws the selection over the finished buffer, so the child never learns of it.
 - **Wheel:** a child that asked for mouse reporting gets the wheel, as Claude Code does. For other children, culm scrolls its own `vt100` scrollback.
 - **Selection during a scroll:** a child that scrolls itself reports no distance. culm hashes the rows before the notch and lines them up against the rows after the repaint, then moves the selection by that offset. Rows that do not line up mean a fresh screen, and culm drops the selection.
@@ -163,7 +163,7 @@ A session that edits a repository gets `git worktree add -b <session-slug>` unde
 
 - **Quit:** `Ctrl+q` asks every child of every tab to leave, and gives them one grace period of three seconds together. A second `Ctrl+q` stops the wait, and culm kills what is left. A forced quit is recorded in the project, and the next open reports it for five seconds.
 - **Closing one tab:** `Alt+Shift+W` moves the tab into `closing_tabs`. Its children leave in the background while the other tabs keep running.
-- **Save prompt:** a quit that needs the workspace prompt asks first, and asks no child to leave until the user answers.
+- **Save prompt:** a quit asks about the workspace when more than one project is open outside a workspace, or when the tabs differ from their workspace in content or in order. `needs_save_prompt` holds the rule. The prompt asks first, and asks no child to leave until the user answers.
 - **Recaps:** a close kills a recap that still runs, so no headless child outlives culm.
 
 ## Headless children

@@ -102,22 +102,14 @@ pub struct BrowserHit {
 
 /// True when a quit must ask whether to keep the open projects as a workspace.
 ///
-/// A window opened from a workspace asks only when the set of projects changed. A
-/// new order of the same projects is not a change. Any other window asks when it
-/// holds more than one project.
+/// A window opened from a workspace asks when its tabs differ from the workspace: a
+/// tab opened, a tab closed, or a tab moved. Any other window asks when it holds
+/// more than one project.
 #[must_use]
 pub fn needs_save_prompt(origin: Option<&WorkspaceOrigin>, open: &[String]) -> bool {
     match origin {
         None => open.len() > 1,
-        Some(origin) => {
-            let mut was = origin.projects.clone();
-            let mut now = open.to_vec();
-            was.sort();
-            was.dedup();
-            now.sort();
-            now.dedup();
-            was != now
-        }
+        Some(origin) => origin.projects != open,
     }
 }
 
@@ -139,6 +131,8 @@ pub struct Browser {
     keyboard_enhanced: bool,
     hooks_installed: bool,
     clipboard: String,
+    /// The tab a press on the tab bar picked up, while the button is still down.
+    dragged_tab: Option<usize>,
 }
 
 impl Browser {
@@ -168,6 +162,7 @@ impl Browser {
             keyboard_enhanced: false,
             hooks_installed: true,
             clipboard: String::new(),
+            dragged_tab: None,
         };
         let mut refused = Vec::new();
         for project in projects.into_iter().take(MAX_TABS) {
@@ -313,6 +308,12 @@ impl Browser {
             Some(HostAction::FocusTab(index)) => self.focus_tab(index),
             Some(HostAction::NewTab) => self.open_picker(deps),
             Some(HostAction::CloseTab) => self.close_tab(deps),
+            Some(HostAction::MoveTabLeft) => {
+                self.move_tab(self.focused, false);
+            }
+            Some(HostAction::MoveTabRight) => {
+                self.move_tab(self.focused, true);
+            }
             _ => {
                 self.app_mut().on_key(key, deps)?;
                 self.share_from_focused();
@@ -357,8 +358,29 @@ impl Browser {
         }
     }
 
-    /// A press on a tab focuses it. Everything else reaches the focused tab, a
-    /// release over the tab bar included, so a drag never stays half done.
+    /// Swaps a tab with its neighbor. The focus stays on the tab that moved, and a
+    /// tab at either end goes no further.
+    fn move_tab(&mut self, index: usize, right: bool) -> usize {
+        let to = if right {
+            index + 1
+        } else {
+            index.wrapping_sub(1)
+        };
+        if index >= self.tabs.len() || to >= self.tabs.len() {
+            return index;
+        }
+        self.tabs.swap(index, to);
+        if self.focused == index {
+            self.focused = to;
+        } else if self.focused == to {
+            self.focused = index;
+        }
+        to
+    }
+
+    /// A press on a tab focuses it, and a drag along the tab bar carries it past
+    /// the tabs it crosses. Everything else reaches the focused tab, a release over
+    /// the tab bar included, so a drag inside a project never stays half done.
     pub fn on_mouse(
         &mut self,
         kind: MouseEventKind,
@@ -376,7 +398,38 @@ impl Browser {
             && let Some(&(_, index)) = hit.tabs.iter().find(|(rect, _)| rect.contains(at))
         {
             self.focus_tab(index);
+            self.dragged_tab = Some(index);
             return;
+        }
+        if let Some(mut dragged) = self.dragged_tab {
+            match kind {
+                // Only the column counts, so a drag that wanders off the bar still
+                // moves the tab. The hit box is one frame old, so the tab under the
+                // pointer is found by position and reached one swap at a time.
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let under = hit
+                        .tabs
+                        .iter()
+                        .find(|(rect, _)| column >= rect.x && column < rect.x + rect.width)
+                        .map(|&(_, index)| index);
+                    if let Some(target) = under {
+                        while dragged != target {
+                            let next = self.move_tab(dragged, target > dragged);
+                            if next == dragged {
+                                break;
+                            }
+                            dragged = next;
+                        }
+                        self.dragged_tab = Some(dragged);
+                    }
+                    return;
+                }
+                MouseEventKind::Up(_) => {
+                    self.dragged_tab = None;
+                    return;
+                }
+                _ => {}
+            }
         }
         self.app_mut()
             .on_mouse_with(kind, column, row, modifiers, &hit.app, deps);

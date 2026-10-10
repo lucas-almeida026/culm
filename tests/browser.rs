@@ -444,14 +444,21 @@ fn a_ninth_tab_is_refused() {
 // Quitting and the save prompt
 
 #[test]
-fn needs_save_prompt_reads_the_project_set_and_not_its_order() {
+fn needs_save_prompt_counts_an_opened_a_closed_and_a_moved_tab() {
     let open = |p: &[&str]| p.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     assert!(!needs_save_prompt(None, &open(&["a"])));
     assert!(needs_save_prompt(None, &open(&["a", "b"])));
     let origin = workspace("w", &["a", "b"]);
-    assert!(!needs_save_prompt(Some(&origin), &open(&["b", "a"])));
-    assert!(needs_save_prompt(Some(&origin), &open(&["a"])));
-    assert!(needs_save_prompt(Some(&origin), &open(&["a", "b", "c"])));
+    assert!(!needs_save_prompt(Some(&origin), &open(&["a", "b"])));
+    assert!(
+        needs_save_prompt(Some(&origin), &open(&["b", "a"])),
+        "a move"
+    );
+    assert!(needs_save_prompt(Some(&origin), &open(&["a"])), "a close");
+    assert!(
+        needs_save_prompt(Some(&origin), &open(&["a", "b", "c"])),
+        "an open"
+    );
 }
 
 #[test]
@@ -951,5 +958,127 @@ fn a_tab_bar_too_narrow_for_every_name_shortens_them() {
         row_text(&terminal, 0).contains('…'),
         "{:?}",
         row_text(&terminal, 0)
+    );
+}
+
+// Moving tabs
+
+fn alt_shift_arrow(code: KeyCode) -> KeyEvent {
+    key(code, KeyModifiers::ALT | KeyModifiers::SHIFT)
+}
+
+/// Three tabs, three columns wide each, starting at column 0.
+fn three_tab_hit() -> BrowserHit {
+    BrowserHit {
+        tabs: vec![
+            (Rect::new(0, 0, 3, 1), 0),
+            (Rect::new(3, 0, 3, 1), 1),
+            (Rect::new(6, 0, 3, 1), 2),
+        ],
+        ..BrowserHit::default()
+    }
+}
+
+fn mouse(b: &mut Browser, f: &Fakes, kind: MouseEventKind, column: u16, hit: &BrowserHit) {
+    b.on_mouse(kind, column, 0, KeyModifiers::NONE, hit, &f.deps());
+}
+
+#[test]
+fn alt_shift_right_moves_the_focused_tab_and_the_focus_follows_it() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b", "c"]);
+
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Right));
+
+    assert_eq!(b.open_projects(), ["b", "a", "c"]);
+    assert_eq!(focused_slug(&b), "a");
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Left));
+    assert_eq!(b.open_projects(), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_tab_at_either_end_goes_no_further() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b"]);
+
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Left));
+    assert_eq!(b.open_projects(), ["a", "b"]);
+    press(&mut b, &f, alt('2'));
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Right));
+    assert_eq!(b.open_projects(), ["a", "b"]);
+}
+
+#[test]
+fn a_moved_tab_is_reached_by_the_digit_of_its_new_place() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b", "c"]);
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Right));
+
+    press(&mut b, &f, alt('1'));
+
+    assert_eq!(focused_slug(&b), "b");
+}
+
+#[test]
+fn dragging_a_tab_carries_it_past_every_tab_it_crosses() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b", "c"]);
+    let hit = three_tab_hit();
+
+    mouse(&mut b, &f, MouseEventKind::Down(MouseButton::Left), 1, &hit);
+    mouse(&mut b, &f, MouseEventKind::Drag(MouseButton::Left), 7, &hit);
+    mouse(&mut b, &f, MouseEventKind::Up(MouseButton::Left), 7, &hit);
+
+    assert_eq!(b.open_projects(), ["b", "c", "a"]);
+    assert_eq!(focused_slug(&b), "a");
+}
+
+#[test]
+fn a_drag_on_a_stale_hit_box_moves_the_tab_once() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b", "c"]);
+    let hit = three_tab_hit();
+
+    mouse(&mut b, &f, MouseEventKind::Down(MouseButton::Left), 1, &hit);
+    // Two drag events land before the next frame redraws the bar.
+    mouse(&mut b, &f, MouseEventKind::Drag(MouseButton::Left), 4, &hit);
+    mouse(&mut b, &f, MouseEventKind::Drag(MouseButton::Left), 4, &hit);
+
+    assert_eq!(b.open_projects(), ["b", "a", "c"]);
+}
+
+#[test]
+fn a_click_on_a_tab_without_a_drag_moves_nothing() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a", "b", "c"]);
+    let hit = three_tab_hit();
+
+    mouse(&mut b, &f, MouseEventKind::Down(MouseButton::Left), 4, &hit);
+    mouse(&mut b, &f, MouseEventKind::Up(MouseButton::Left), 4, &hit);
+
+    assert_eq!(b.open_projects(), ["a", "b", "c"]);
+    assert_eq!(focused_slug(&b), "b");
+}
+
+#[test]
+fn a_reordered_workspace_offers_to_save_the_new_order() {
+    let f = Fakes::new();
+    let mut all = Workspaces::default();
+    all.create("w", &["a".into(), "b".into()]).expect("created");
+    f.store.put_workspaces(&all);
+    let mut b = f.open_from(&["a", "b"], Some(workspace("w", &["a", "b"])));
+    press(&mut b, &f, alt_shift_arrow(KeyCode::Right));
+
+    press(&mut b, &f, ctrl_q());
+    let Some(BrowserModal::SavePrompt(prompt)) = b.modal() else {
+        panic!("a new order asks before the quit");
+    };
+    assert_eq!(prompt.choices[0], SaveChoice::Update);
+    press(&mut b, &f, enter());
+    finish_quit(&mut b, &f);
+
+    assert_eq!(
+        f.store.workspaces().find("w").map(|w| w.projects.clone()),
+        Some(vec!["b".to_string(), "a".to_string()])
     );
 }
