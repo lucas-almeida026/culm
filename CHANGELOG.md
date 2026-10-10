@@ -2,7 +2,7 @@
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). `Cargo.toml` holds the version of each commit.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-10
 
 ### Added
 
@@ -48,6 +48,6 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 First release. The [release page](https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0) lists the features.
 
-[Unreleased]: https://github.com/lucas-almeida026/culm/compare/v0.1.1...HEAD
+[0.2.0]: https://github.com/lucas-almeida026/culm/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/lucas-almeida026/culm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0
