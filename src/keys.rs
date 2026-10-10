@@ -105,6 +105,13 @@ pub fn encode(k: &KeyEvent, cursor: CursorKeys) -> Option<Vec<u8>> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        // The disambiguated keyboard protocol reports Ctrl+Backspace as Backspace
+        // with a modifier, so it would otherwise collapse onto DEL. Kitty sends BS
+        // for it, but zsh and bash bind BS to deleting one character. ESC DEL is
+        // `backward-kill-word` in zsh, bash and fish by default, and Claude Code
+        // deletes a word on it too, checked on 2026-10-10 against Claude Code
+        // 2.1.296. It is what Alt+Backspace sends, so Alt adds no second prefix.
+        KeyCode::Backspace if ctrl => vec![0x1b, 0x7f],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Esc => vec![0x1b],
         KeyCode::Left => cursor_key(b'D', shift, ctrl, cursor),
@@ -250,6 +257,46 @@ mod tests {
         );
         assert_eq!(alt, shift, "both mean a newline that does not submit");
         assert_eq!(both, shift, "holding both never doubles the prefix");
+    }
+
+    #[test]
+    fn control_backspace_deletes_a_word_instead_of_a_character() {
+        assert_eq!(
+            encode(
+                &key(KeyCode::Backspace, KeyModifiers::CONTROL),
+                CursorKeys::Normal
+            ),
+            Some(vec![0x1b, 0x7f]),
+            "a shell binds ESC DEL to backward-kill-word, and BS to one character"
+        );
+        assert_eq!(
+            encode(
+                &key(KeyCode::Backspace, KeyModifiers::NONE),
+                CursorKeys::Normal
+            ),
+            Some(vec![0x7f])
+        );
+    }
+
+    #[test]
+    fn control_backspace_and_alt_backspace_agree() {
+        let ctrl = encode(
+            &key(KeyCode::Backspace, KeyModifiers::CONTROL),
+            CursorKeys::Normal,
+        );
+        let alt = encode(
+            &key(KeyCode::Backspace, KeyModifiers::ALT),
+            CursorKeys::Normal,
+        );
+        let both = encode(
+            &key(
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            CursorKeys::Normal,
+        );
+        assert_eq!(ctrl, alt, "both delete the word before the cursor");
+        assert_eq!(both, alt, "holding both never doubles the prefix");
     }
 
     #[test]
