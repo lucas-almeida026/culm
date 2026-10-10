@@ -546,6 +546,25 @@ fn keys_reach_the_visible_session_only() {
 }
 
 #[test]
+fn home_and_end_reach_a_shell_line_editor_in_its_own_mode() {
+    // zsh sends terminfo smkx before it reads a line, then binds the SS3 forms.
+    let f = Fakes::with_output(b"\x1b[?1h\x1b=prompt");
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let session = app.entries()[0].live.as_ref().expect("session is live");
+    assert!(session.wait_for_text("prompt", Duration::from_secs(1)));
+
+    app.on_key(&key(KeyCode::Home, KeyModifiers::NONE), &f.deps())
+        .expect("home is forwarded");
+    app.on_key(&key(KeyCode::End, KeyModifiers::NONE), &f.deps())
+        .expect("end is forwarded");
+
+    let pty = f.spawner.last_pty().expect("a pty exists");
+    assert_eq!(pty.written_utf8(), "\x1bOH\x1bOF");
+}
+
+#[test]
 fn paste_reaches_the_focused_session_bracketed() {
     let f = Fakes::new();
     let mut app = App::new(project());

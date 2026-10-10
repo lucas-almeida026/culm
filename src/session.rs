@@ -156,6 +156,20 @@ impl Session {
         })
     }
 
+    /// How the child asked the arrows, `Home` and `End` to be sent.
+    #[must_use]
+    pub fn cursor_keys(&self) -> crate::keys::CursorKeys {
+        let parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        if parser.screen().application_cursor() {
+            crate::keys::CursorKeys::Application
+        } else {
+            crate::keys::CursorKeys::Normal
+        }
+    }
+
     /// Moves the view back through the scrollback. A positive count goes up.
     ///
     /// Returns how far the view really moved, which is short of `lines` at either end

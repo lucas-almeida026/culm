@@ -684,7 +684,11 @@ impl App {
                     self.filter_key(key);
                     return Ok(());
                 }
-                if let Some(bytes) = crate::keys::encode(key) {
+                let cursor = self
+                    .focused_session()
+                    .map(Session::cursor_keys)
+                    .unwrap_or_default();
+                if let Some(bytes) = crate::keys::encode(key, cursor) {
                     self.send_to_focus(&bytes)?;
                 }
             }

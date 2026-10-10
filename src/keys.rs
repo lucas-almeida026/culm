@@ -72,9 +72,20 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
     }
 }
 
+/// How the child asked the arrows, `Home` and `End` to be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorKeys {
+    /// `CSI`, as in `ESC [ A`. A terminal starts here.
+    #[default]
+    Normal,
+    /// `SS3`, as in `ESC O A`, set by `DECCKM`. A shell line editor turns it on with
+    /// terminfo `smkx` and then binds only the `SS3` forms that terminfo lists.
+    Application,
+}
+
 /// Translates a key event into the bytes a terminal sends to a child process.
 #[must_use]
-pub fn encode(k: &KeyEvent) -> Option<Vec<u8>> {
+pub fn encode(k: &KeyEvent, cursor: CursorKeys) -> Option<Vec<u8>> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -96,12 +107,12 @@ pub fn encode(k: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Left => arrow(b'D', shift, ctrl),
-        KeyCode::Right => arrow(b'C', shift, ctrl),
-        KeyCode::Up => arrow(b'A', shift, ctrl),
-        KeyCode::Down => arrow(b'B', shift, ctrl),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::Left => cursor_key(b'D', shift, ctrl, cursor),
+        KeyCode::Right => cursor_key(b'C', shift, ctrl, cursor),
+        KeyCode::Up => cursor_key(b'A', shift, ctrl, cursor),
+        KeyCode::Down => cursor_key(b'B', shift, ctrl, cursor),
+        KeyCode::Home => cursor_key(b'H', shift, ctrl, cursor),
+        KeyCode::End => cursor_key(b'F', shift, ctrl, cursor),
         KeyCode::PageUp => b"\x1b[5~".to_vec(),
         KeyCode::PageDown => b"\x1b[6~".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
@@ -160,9 +171,19 @@ pub fn encode_paste(text: &str) -> Vec<u8> {
     v
 }
 
-fn arrow(letter: u8, shift: bool, ctrl: bool) -> Vec<u8> {
+/// An arrow, `Home` or `End`, as xterm sends it.
+///
+/// A modified key always takes the `CSI 1 ; m` form, whatever the mode, because
+/// `SS3` carries no parameter.
+fn cursor_key(letter: u8, shift: bool, ctrl: bool, cursor: CursorKeys) -> Vec<u8> {
     let m = match (shift, ctrl) {
-        (false, false) => return vec![0x1b, b'[', letter],
+        (false, false) => {
+            let intro = match cursor {
+                CursorKeys::Normal => b'[',
+                CursorKeys::Application => b'O',
+            };
+            return vec![0x1b, intro, letter];
+        }
         (true, false) => b'2',
         (false, true) => b'5',
         (true, true) => b'6',
@@ -180,20 +201,29 @@ mod tests {
 
     #[test]
     fn shift_tab_becomes_csi_z() {
-        let bytes = encode(&key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let bytes = encode(
+            &key(KeyCode::BackTab, KeyModifiers::SHIFT),
+            CursorKeys::Normal,
+        );
         assert_eq!(bytes, Some(b"\x1b[Z".to_vec()));
     }
 
     #[test]
     fn control_letter_becomes_a_control_byte() {
-        let bytes = encode(&key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let bytes = encode(
+            &key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            CursorKeys::Normal,
+        );
         assert_eq!(bytes, Some(vec![0x12]));
     }
 
     #[test]
     fn shift_enter_inserts_a_newline_instead_of_submitting() {
         assert_eq!(
-            encode(&key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            encode(
+                &key(KeyCode::Enter, KeyModifiers::SHIFT),
+                CursorKeys::Normal
+            ),
             Some(vec![0x1b, b'\r']),
             "Claude Code binds shift+enter to ESC then CR in its own terminal setup"
         );
@@ -202,19 +232,22 @@ mod tests {
     #[test]
     fn plain_enter_still_submits() {
         assert_eq!(
-            encode(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            encode(&key(KeyCode::Enter, KeyModifiers::NONE), CursorKeys::Normal),
             Some(vec![b'\r'])
         );
     }
 
     #[test]
     fn alt_enter_and_shift_enter_agree() {
-        let alt = encode(&key(KeyCode::Enter, KeyModifiers::ALT));
-        let shift = encode(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-        let both = encode(&key(
-            KeyCode::Enter,
-            KeyModifiers::ALT | KeyModifiers::SHIFT,
-        ));
+        let alt = encode(&key(KeyCode::Enter, KeyModifiers::ALT), CursorKeys::Normal);
+        let shift = encode(
+            &key(KeyCode::Enter, KeyModifiers::SHIFT),
+            CursorKeys::Normal,
+        );
+        let both = encode(
+            &key(KeyCode::Enter, KeyModifiers::ALT | KeyModifiers::SHIFT),
+            CursorKeys::Normal,
+        );
         assert_eq!(alt, shift, "both mean a newline that does not submit");
         assert_eq!(both, shift, "holding both never doubles the prefix");
     }
@@ -231,7 +264,7 @@ mod tests {
     #[test]
     fn escape_reaches_the_child_unchanged() {
         assert_eq!(
-            encode(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            encode(&key(KeyCode::Esc, KeyModifiers::NONE), CursorKeys::Normal),
             Some(vec![0x1b])
         );
     }
@@ -407,9 +440,55 @@ mod tests {
             None
         );
         assert_eq!(
-            encode(&key(KeyCode::PageUp, KeyModifiers::NONE)),
+            encode(
+                &key(KeyCode::PageUp, KeyModifiers::NONE),
+                CursorKeys::Normal
+            ),
             Some(b"\x1b[5~".to_vec())
         );
+    }
+
+    #[test]
+    fn home_and_end_follow_the_cursor_key_mode() {
+        let home = key(KeyCode::Home, KeyModifiers::NONE);
+        let end = key(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(encode(&home, CursorKeys::Normal), Some(b"\x1b[H".to_vec()));
+        assert_eq!(encode(&end, CursorKeys::Normal), Some(b"\x1b[F".to_vec()));
+        assert_eq!(
+            encode(&home, CursorKeys::Application),
+            Some(b"\x1bOH".to_vec()),
+            "zsh binds terminfo khome, which is the SS3 form once smkx is sent"
+        );
+        assert_eq!(
+            encode(&end, CursorKeys::Application),
+            Some(b"\x1bOF".to_vec())
+        );
+    }
+
+    #[test]
+    fn arrows_follow_the_cursor_key_mode() {
+        let up = key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(encode(&up, CursorKeys::Normal), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            encode(&up, CursorKeys::Application),
+            Some(b"\x1bOA".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_home_and_end_carry_the_modifier() {
+        for cursor in [CursorKeys::Normal, CursorKeys::Application] {
+            assert_eq!(
+                encode(&key(KeyCode::Home, KeyModifiers::SHIFT), cursor),
+                Some(b"\x1b[1;2H".to_vec()),
+                "shift+home selects to the start of the line"
+            );
+            assert_eq!(
+                encode(&key(KeyCode::End, KeyModifiers::CONTROL), cursor),
+                Some(b"\x1b[1;5F".to_vec()),
+                "ctrl+end is not plain end"
+            );
+        }
     }
 
     #[test]
