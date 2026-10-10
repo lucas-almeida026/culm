@@ -171,7 +171,7 @@ The culm process owns the socket. A session runs only while culm runs, so a hook
 The model for the interface is a micro-frontend host. Each session behaves as a terminal that runs on its own. culm arranges those terminals and adds management on top.
 
 80. Render each session as a terminal panel inside the interface.
-81. Keep the focused panel interactive. Keyboard input reaches the Claude Code process in the focused panel.
+81. Keep the focused panel interactive. Keyboard input reaches the Claude Code process in the focused panel while the panel holds the keys, as requirement 156 defines.
 82. Render the whole terminal for the focused panel, not a summary and not a snapshot.
 83. Show one session at a time, in the manner of a browser with vertical tabs. A session that is not visible keeps running.
 84. Show the attention state of a session on the session list, without stealing focus.
@@ -274,6 +274,18 @@ One Claude Code process measured about 436 MB of resident memory on 2026-09-02. 
 154. Refuse to restore a session that was active while nine sessions are active. Keep the session archived, and report the limit inside the list.
 155. Look for the transcript before a restore. When the transcript no longer exists, remove the session from the archive and report the reason inside the list. Keep the worktrees and the branch on disk.
 
+### Panes
+
+156. Split the screen into two panes: the sidebar and the panel. Give the keys to one pane at a time. Give them to the panel when the project opens.
+157. Draw the border and the title of the pane that holds the keys in the accent color. Draw the other pane in a dim color.
+158. Move the keys from one pane to the other with `Alt+Shift+O`. Give the keys to the panel on `Alt` plus a digit, on `Alt+0`, on a new session, and on a restore from the archive.
+159. Give the keys to the pane under the pointer on a mouse move, on a drag, and on a press. Leave the keys where they are while the separator is dragged.
+160. Send no key and no paste to a child while the sidebar holds the keys.
+161. Move a highlight one sidebar row with `Up`, `Down`, `k`, and `j` while the sidebar holds the keys. Start the highlight on the row the panel shows. Stop the highlight at the first row and at the last row.
+162. Show the highlighted session in the panel on `Enter`, and give the keys to the panel. Give the keys to the panel on `Esc` with no change to the panel.
+163. Focus the search box on `/`. On any other letter, focus the search box and start the search with that letter.
+164. Give the keys to the sidebar while the search box is focused. Give them to the panel when the search ends with `Enter` or `Esc`.
+
 ## Out of scope
 
 - Git diff, commit, push, and any other version control action beyond worktree and branch management.
@@ -305,6 +317,7 @@ Every question below was open in the first version of this document. Each row re
 | 15 | Naming an imported session | The transcript title when it holds one. Otherwise a headless `claude -p --model haiku` child reads the first prompt and answers with a name. Otherwise the first eight characters of the id. | 2026-09-06 |
 | 16 | Confirming a session delete | Two buttons, with the cursor on no. `y` and `n` move the cursor, `Enter` answers, and a click answers. The typed name is dropped, because retyping a name is friction rather than safety when the default answer is already no. | 2026-09-07 |
 | 17 | Archive or pause | Both stop the process. A pause keeps the session in the sidebar and in the paused search, and takes a recap while `recap-on-pause` is on. An archive removes the session from both and never takes a recap. | 2026-10-10 |
+| 18 | Keys after a click on a sidebar row | The sidebar holds the keys, because the pointer is over the sidebar. The keys follow the pointer, so a move over the panel gives them back to the panel. | 2026-10-10 |
 
 ## Deferred
 

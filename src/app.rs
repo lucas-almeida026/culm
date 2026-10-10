@@ -102,6 +102,24 @@ pub enum Focus {
     Entry(usize),
 }
 
+/// Which half of the screen holds the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pane {
+    /// The session list. Keys move a highlight and never reach a child.
+    Sidebar,
+    /// The visible session. Keys reach its child.
+    #[default]
+    Panel,
+}
+
+/// The sidebar row under the keyboard highlight. A session is held by id, because
+/// the list reorders as sessions pause and resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarRow {
+    Shell,
+    Session(String),
+}
+
 /// Which field of the new-session form holds the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Field {
@@ -274,6 +292,10 @@ pub struct App {
     filter: String,
     /// True while keys go to the search box rather than to a child.
     filter_focused: bool,
+    /// Which half of the screen the keys go to while the search box is not focused.
+    pane: Pane,
+    /// The highlighted sidebar row. `None` follows whatever the panel shows.
+    sidebar_cursor: Option<SidebarRow>,
 }
 
 impl App {
@@ -310,6 +332,8 @@ impl App {
             copied: None,
             filter: String::new(),
             filter_focused: false,
+            pane: Pane::Panel,
+            sidebar_cursor: None,
         }
     }
 
@@ -507,6 +531,129 @@ impl App {
         self.filter_focused
     }
 
+    /// Which half of the screen holds the keys. The search box sits in the sidebar,
+    /// so the sidebar holds them while the box does.
+    #[must_use]
+    pub fn pane(&self) -> Pane {
+        if self.filter_focused {
+            Pane::Sidebar
+        } else {
+            self.pane
+        }
+    }
+
+    /// Moves the keys to one half of the screen. Entering the sidebar puts the
+    /// highlight on the row the panel shows, so the keyboard starts from there.
+    pub fn set_pane(&mut self, pane: Pane) {
+        if pane == Pane::Sidebar && self.pane() != Pane::Sidebar {
+            self.sidebar_cursor = Some(self.row_of(self.focus()));
+        }
+        if pane == Pane::Panel {
+            // The search box is part of the sidebar, so it lets go of the keys too.
+            self.filter_focused = false;
+        }
+        self.pane = pane;
+    }
+
+    /// Every row the sidebar lists, in screen order: the shell, the active sessions,
+    /// and the paused sessions the search admits.
+    #[must_use]
+    pub fn sidebar_rows(&self) -> Vec<Focus> {
+        let mut rows = vec![Focus::Shell];
+        rows.extend(
+            self.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.is_active())
+                .map(|(i, _)| Focus::Entry(i)),
+        );
+        rows.extend(self.paused_matches().into_iter().map(Focus::Entry));
+        rows
+    }
+
+    /// The row under the keyboard highlight, while the sidebar holds the keys and the
+    /// search box does not.
+    #[must_use]
+    pub fn sidebar_cursor(&self) -> Option<Focus> {
+        if self.pane != Pane::Sidebar || self.filter_focused {
+            return None;
+        }
+        let rows = self.sidebar_rows();
+        let wanted = match self.sidebar_cursor.as_ref() {
+            Some(SidebarRow::Shell) => Some(Focus::Shell),
+            Some(SidebarRow::Session(id)) => self
+                .entries
+                .iter()
+                .position(|e| &e.record.id == id)
+                .map(Focus::Entry),
+            None => None,
+        };
+        // A row that left the list, by an archive or a search, hands the highlight
+        // back to the row the panel shows.
+        match wanted {
+            Some(row) if rows.contains(&row) => Some(row),
+            _ => Some(self.focus()),
+        }
+    }
+
+    fn row_of(&self, focus: Focus) -> SidebarRow {
+        match focus {
+            Focus::Shell => SidebarRow::Shell,
+            Focus::Entry(i) => self.entries.get(i).map_or(SidebarRow::Shell, |e| {
+                SidebarRow::Session(e.record.id.clone())
+            }),
+        }
+    }
+
+    /// Moves the highlight one row up or down, stopping at either end.
+    fn move_sidebar_cursor(&mut self, down: bool) {
+        let rows = self.sidebar_rows();
+        let Some(current) = self.sidebar_cursor() else {
+            return;
+        };
+        let at = rows.iter().position(|r| *r == current).unwrap_or(0);
+        let next = if down {
+            (at + 1).min(rows.len().saturating_sub(1))
+        } else {
+            at.saturating_sub(1)
+        };
+        if let Some(&row) = rows.get(next) {
+            self.sidebar_cursor = Some(self.row_of(row));
+        }
+    }
+
+    /// Feeds the sidebar. No key reaches a child while the sidebar holds the keys.
+    fn sidebar_key(&mut self, key: &KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_sidebar_cursor(false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_sidebar_cursor(true),
+            KeyCode::Enter => {
+                match self.sidebar_cursor() {
+                    Some(Focus::Shell) => self.focus_shell(),
+                    Some(Focus::Entry(index)) => self.set_focus(index),
+                    None => {}
+                }
+                self.set_pane(Pane::Panel);
+            }
+            KeyCode::Esc => self.set_pane(Pane::Panel),
+            KeyCode::Char('/') => self.filter_focused = true,
+            // Any other letter starts a search with itself, so finding a paused
+            // session by name takes no extra key.
+            KeyCode::Char(c) => {
+                self.filter_focused = true;
+                self.filter.push(c);
+            }
+            _ => {}
+        }
+    }
+
     /// The archive list, when that is the form on screen.
     #[must_use]
     pub fn archive_list(&self) -> Option<&ArchiveList> {
@@ -697,12 +844,20 @@ impl App {
             Some(HostAction::Focus(i)) => {
                 if i < self.active_count() {
                     self.set_focus(i);
+                    self.set_pane(Pane::Panel);
                 }
             }
             Some(HostAction::NewSession) => self.open_form(),
             Some(HostAction::TogglePause) => self.toggle_pause(deps)?,
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
-            Some(HostAction::FocusShell) => self.focus_shell(),
+            Some(HostAction::FocusShell) => {
+                self.focus_shell();
+                self.set_pane(Pane::Panel);
+            }
+            Some(HostAction::TogglePane) => match self.pane() {
+                Pane::Sidebar => self.set_pane(Pane::Panel),
+                Pane::Panel => self.set_pane(Pane::Sidebar),
+            },
             Some(HostAction::DeleteSession) => self.open_delete(),
             Some(HostAction::RenameSession) => self.open_rename(),
             Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
@@ -710,7 +865,12 @@ impl App {
             Some(HostAction::ToggleArchive) => self.archive_focused(deps)?,
             Some(HostAction::ShowArchive) => self.open_archive(),
             Some(HostAction::FindSession) => {
-                self.filter_focused = !self.filter_focused;
+                if self.filter_focused {
+                    self.set_pane(Pane::Panel);
+                } else {
+                    self.set_pane(Pane::Sidebar);
+                    self.filter_focused = true;
+                }
                 self.selection = None;
             }
             // Half a panel, the step a pager uses.
@@ -719,6 +879,10 @@ impl App {
             None => {
                 if self.filter_focused {
                     self.filter_key(key);
+                    return Ok(());
+                }
+                if self.pane == Pane::Sidebar {
+                    self.sidebar_key(key);
                     return Ok(());
                 }
                 let cursor = self
@@ -757,6 +921,10 @@ impl App {
         }
         if self.filter_focused {
             self.filter.push_str(text);
+            return Ok(());
+        }
+        // The keys are in the sidebar, so the paste is not the session's either.
+        if self.pane == Pane::Sidebar {
             return Ok(());
         }
         let bytes = crate::keys::encode_paste(text);
@@ -965,7 +1133,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
-                self.filter_focused = false;
+                self.set_pane(Pane::Panel);
             }
             KeyCode::Backspace => {
                 self.filter.pop();
@@ -974,7 +1142,7 @@ impl App {
                 if let Some(&index) = self.paused_matches().first() {
                     self.set_focus(index);
                 }
-                self.filter_focused = false;
+                self.set_pane(Pane::Panel);
             }
             KeyCode::Char(c) => self.filter.push(c),
             _ => {}
@@ -1206,6 +1374,7 @@ impl App {
                 });
                 self.reorder();
                 self.focus_slug_of_last_active();
+                self.set_pane(Pane::Panel);
                 self.clear_status();
                 self.save(deps)?;
             }
@@ -1389,6 +1558,7 @@ impl App {
         self.focus_id(&record.id);
         self.shell_focused = false;
         self.selection = None;
+        self.set_pane(Pane::Panel);
         self.set_status(status);
         self.save(deps)
     }
@@ -1776,6 +1946,21 @@ impl App {
             }
             return;
         }
+        // The keys follow the mouse. A move, a drag and a press each give the keys to
+        // the half of the screen under the pointer, except while the separator is
+        // dragged, which crosses from one half into the other on purpose.
+        if !self.dragging
+            && matches!(
+                kind,
+                MouseEventKind::Moved | MouseEventKind::Drag(_) | MouseEventKind::Down(_)
+            )
+        {
+            if column < hit.sidebar_width {
+                self.set_pane(Pane::Sidebar);
+            } else if hit.panel.contains(at) {
+                self.set_pane(Pane::Panel);
+            }
+        }
         match kind {
             MouseEventKind::Down(MouseButton::Left) if column == hit.separator_col => {
                 self.dragging = true;
@@ -1790,6 +1975,8 @@ impl App {
                     Some((_, Focus::Entry(index))) => self.set_focus(*index),
                     None => {}
                 }
+                // The highlight lands on the row that was clicked.
+                self.sidebar_cursor = Some(self.row_of(self.focus()));
             }
             MouseEventKind::Down(MouseButton::Left)
                 if self.modal.is_none() && hit.inner.contains(at) =>

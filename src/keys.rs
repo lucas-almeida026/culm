@@ -26,6 +26,7 @@ pub enum HostAction {
     NerdMode,
     ToggleArchive,
     ShowArchive,
+    TogglePane,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -74,6 +75,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('a') if shift => Some(HostAction::ToggleArchive),
         KeyCode::Char('L') => Some(HostAction::ShowArchive),
         KeyCode::Char('l') if shift => Some(HostAction::ShowArchive),
+        KeyCode::Char('O') => Some(HostAction::TogglePane),
+        KeyCode::Char('o') if shift => Some(HostAction::TogglePane),
         _ => None,
     }
 }
@@ -564,6 +567,22 @@ mod tests {
         ));
         assert_eq!(legacy, Some(HostAction::ShowArchive));
         assert_eq!(kitty, Some(HostAction::ShowArchive));
+    }
+
+    #[test]
+    fn alt_shift_o_moves_the_keys_between_the_panes_on_both_keyboard_paths() {
+        let legacy = host_action(&key(KeyCode::Char('O'), KeyModifiers::ALT));
+        let kitty = host_action(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(legacy, Some(HostAction::TogglePane));
+        assert_eq!(kitty, Some(HostAction::TogglePane));
+        assert_eq!(
+            host_action(&key(KeyCode::Char('o'), KeyModifiers::ALT)),
+            None,
+            "a bare Alt+o stays with the child"
+        );
     }
 
     #[test]

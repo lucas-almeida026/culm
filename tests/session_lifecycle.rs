@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use culm::app::{App, Deps, Field, Focus, NewSession};
+use culm::app::{App, Deps, Field, Focus, NewSession, Pane};
 use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
 use culm::pty::SessionSpec;
@@ -3500,4 +3500,239 @@ fn an_archived_session_stays_archived_across_a_reopen_and_starts_no_process() {
     assert_eq!(one.record.state, SessionState::Archived);
     assert_eq!(one.record.archived_from, Some(SessionState::Active));
     assert_eq!(session_specs(&f).len(), before, "no session was started");
+}
+
+fn three_sessions(f: &Fakes) -> App {
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    for name in ["one", "two", "three"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("a session starts");
+    }
+    focus_named(&mut app, "one");
+    app.set_pane(Pane::Panel);
+    app
+}
+
+fn written(f: &Fakes, name: &str) -> String {
+    f.spawner
+        .spawn_named(name)
+        .expect("the session exists")
+        .pty
+        .written_utf8()
+}
+
+#[test]
+fn alt_shift_o_moves_the_keys_to_the_sidebar_and_back() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    assert_eq!(app.pane(), Pane::Panel, "the panel holds the keys at first");
+
+    press(&mut app, &f, alt_shift('O'));
+    assert_eq!(app.pane(), Pane::Sidebar);
+    type_text(&mut app, &f, "jk");
+    press(&mut app, &f, alt_shift('O'));
+    assert_eq!(app.pane(), Pane::Panel);
+    type_text(&mut app, &f, "x");
+
+    assert_eq!(
+        written(&f, "one"),
+        "x",
+        "only the key typed in the panel arrived"
+    );
+}
+
+#[test]
+fn the_sidebar_highlight_starts_on_the_row_the_panel_shows() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    focus_named(&mut app, "two");
+
+    press(&mut app, &f, alt_shift('O'));
+
+    assert_eq!(app.sidebar_cursor(), Some(app.focus()));
+}
+
+#[test]
+fn moving_down_and_pressing_enter_shows_the_next_session_and_returns_the_keys() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app.visible().map(culm::app::Entry::name),
+        Some("two"),
+        "the row below one is two"
+    );
+    assert_eq!(app.pane(), Pane::Panel);
+    assert_eq!(written(&f, "one"), "", "the sidebar keys reached no child");
+    assert_eq!(written(&f, "two"), "");
+}
+
+#[test]
+fn j_and_k_move_the_highlight_like_the_arrows_and_stop_at_the_ends() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    type_text(&mut app, &f, "kkkk");
+    assert_eq!(
+        app.sidebar_cursor(),
+        Some(Focus::Shell),
+        "the shell is the top row"
+    );
+    type_text(&mut app, &f, "jjjjjj");
+    let last = *app.sidebar_rows().last().expect("the sidebar has rows");
+    assert_eq!(
+        app.sidebar_cursor(),
+        Some(last),
+        "the highlight stops at the bottom"
+    );
+}
+
+#[test]
+fn moving_the_highlight_does_not_change_the_visible_session() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
+}
+
+#[test]
+fn escape_in_the_sidebar_returns_the_keys_without_a_switch() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_eq!(app.pane(), Pane::Panel);
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
+}
+
+#[test]
+fn a_letter_typed_in_the_sidebar_starts_the_paused_search() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    type_text(&mut app, &f, "th");
+
+    assert!(app.filter_focused());
+    assert_eq!(app.filter(), "th");
+    assert_eq!(
+        app.pane(),
+        Pane::Sidebar,
+        "the search box sits in the sidebar"
+    );
+}
+
+#[test]
+fn a_paste_while_the_sidebar_holds_the_keys_reaches_no_child() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    app.on_paste("rm -rf /").expect("the paste is handled");
+
+    assert_eq!(written(&f, "one"), "");
+}
+
+#[test]
+fn alt_and_a_digit_give_the_keys_back_to_the_panel() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    press(&mut app, &f, key(KeyCode::Char('2'), KeyModifiers::ALT));
+
+    assert_eq!(app.pane(), Pane::Panel);
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("two"));
+}
+
+#[test]
+fn the_keys_follow_the_mouse_from_one_half_to_the_other() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    let hit = sidebar_hit();
+
+    app.on_mouse(MouseEventKind::Moved, 5, 5, &hit, &f.deps());
+    assert_eq!(
+        app.pane(),
+        Pane::Sidebar,
+        "the pointer moved over the sidebar"
+    );
+    app.on_mouse(MouseEventKind::Moved, 50, 5, &hit, &f.deps());
+    assert_eq!(app.pane(), Pane::Panel, "and back over the panel");
+}
+
+#[test]
+fn a_drag_from_the_panel_into_the_sidebar_gives_the_sidebar_the_keys() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    let hit = sidebar_hit();
+
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        5,
+        &hit,
+        &f.deps(),
+    );
+    assert_eq!(app.pane(), Pane::Panel);
+    app.on_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        10,
+        5,
+        &hit,
+        &f.deps(),
+    );
+    assert_eq!(app.pane(), Pane::Sidebar);
+}
+
+#[test]
+fn dragging_the_separator_over_the_panel_leaves_the_keys_where_they_were() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    let hit = sidebar_hit();
+    app.on_mouse(MouseEventKind::Moved, 5, 5, &hit, &f.deps());
+
+    drag_separator(&mut app, &f, &hit, 45);
+
+    assert_eq!(
+        app.pane(),
+        Pane::Sidebar,
+        "the drag crossed into the panel on purpose"
+    );
+}
+
+#[test]
+fn a_click_on_a_sidebar_row_puts_the_highlight_there() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+    let hit = HitBox {
+        rows: vec![
+            (1, Focus::Shell),
+            (4, Focus::Entry(0)),
+            (5, Focus::Entry(1)),
+        ],
+        ..sidebar_hit()
+    };
+
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        5,
+        5,
+        &hit,
+        &f.deps(),
+    );
+
+    assert_eq!(app.focus(), Focus::Entry(1));
+    assert_eq!(app.sidebar_cursor(), Some(Focus::Entry(1)));
 }

@@ -9,7 +9,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Rename};
+use crate::app::{
+    Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Pane, Rename,
+};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -51,6 +53,24 @@ fn color_of(attention: Attention) -> Color {
         Attention::NeedsAnswer => Color::Yellow,
         Attention::NeedsPermission => Color::Red,
     }
+}
+
+/// The border of one half of the screen. The half that holds the keys is drawn in
+/// the accent color, so the user always sees where a keystroke will land.
+fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
+    let style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title_style = if focused {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    };
+    Block::bordered()
+        .border_style(style)
+        .title(title.into().style(title_style))
 }
 
 /// The spinner frames. Braille dots read as a turning circle at any font size.
@@ -143,7 +163,8 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
     let mut rows: Vec<(u16, Focus)> = Vec::new();
 
     rows.push((area.y + 1 + lines.len() as u16, Focus::Shell));
-    lines.push(shell_line(app, inner_width));
+    let cursor = app.sidebar_cursor();
+    lines.push(shell_line(app, cursor == Some(Focus::Shell), inner_width));
     lines.push(Line::from(""));
 
     lines.push(header("active"));
@@ -158,6 +179,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
             entry,
             Some(number),
             app.focus() == Focus::Entry(index),
+            cursor == Some(Focus::Entry(index)),
             inner_width,
         ));
     }
@@ -180,6 +202,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
             entry,
             None,
             app.focus() == Focus::Entry(index),
+            cursor == Some(Focus::Entry(index)),
             inner_width,
         ));
     }
@@ -192,7 +215,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> (Vec<(u16, Focus)>, Opt
     }
 
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title("culm")),
+        Paragraph::new(lines).block(pane_block("culm", app.pane() == Pane::Sidebar)),
         area,
     );
     (rows, Some(search_row))
@@ -215,13 +238,14 @@ fn search_line(app: &App, inner_width: usize) -> Line<'static> {
 
 /// Position 0. It carries no marker, so the prefix stays blank and the names below
 /// keep their alignment.
-fn shell_line(app: &App, inner_width: usize) -> Line<'static> {
+fn shell_line(app: &App, cursor: bool, inner_width: usize) -> Line<'static> {
     let focused = app.focus() == Focus::Shell;
     let base = if focused {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else {
         Style::default().fg(Color::White)
     };
+    let base = with_cursor(base, cursor);
     let rss = if app.shell_rss() > 0 {
         format!("{} ", format_bytes(app.shell_rss()))
     } else {
@@ -258,6 +282,7 @@ fn entry_line(
     entry: &Entry,
     number: Option<usize>,
     focused: bool,
+    cursor: bool,
     inner_width: usize,
 ) -> Line<'static> {
     let base = if focused {
@@ -267,6 +292,7 @@ fn entry_line(
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let base = with_cursor(base, cursor);
     let marker = Span::styled(
         entry.attention.emoji().to_string(),
         if focused {
@@ -299,6 +325,29 @@ fn entry_line(
     ])
 }
 
+/// The fill behind the keyboard highlight: a dark gray from the 256-color ramp.
+///
+/// The sixteen palette colors belong to the user's theme, and a theme may give two
+/// of them one value. gruvbox gives bright white and bright black both `#928374`,
+/// so a highlight drawn with those two hides its own text. A theme rarely touches
+/// the ramp, so this fill stays dark, and the text takes the terminal's own
+/// foreground, which every theme keeps readable against a dark fill.
+const CURSOR_FILL: Color = Color::Indexed(237);
+
+/// Marks the row under the keyboard highlight. The row the panel shows keeps its
+/// own fill, so the two read apart when they differ.
+fn with_cursor(base: Style, cursor: bool) -> Style {
+    if !cursor {
+        return base;
+    }
+    let marked = base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    if base.bg == Some(Color::Cyan) {
+        marked
+    } else {
+        marked.bg(CURSOR_FILL).fg(Color::Reset)
+    }
+}
+
 fn truncate(text: &str, room: usize) -> String {
     if text.chars().count() <= room {
         return text.to_string();
@@ -312,11 +361,17 @@ fn truncate(text: &str, room: usize) -> String {
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     if app.focus() == Focus::Shell {
         match app.shell() {
-            Some(shell) => draw_terminal(f, shell, title_of("shell", shell), area),
+            Some(shell) => draw_terminal(
+                f,
+                shell,
+                title_of("shell", shell),
+                app.pane() == Pane::Panel,
+                area,
+            ),
             None => f.render_widget(
                 Paragraph::new("no shell")
                     .style(Style::default().fg(Color::DarkGray))
-                    .block(Block::bordered().title(" shell ")),
+                    .block(pane_block(" shell ", app.pane() == Pane::Panel)),
                 area,
             ),
         }
@@ -333,7 +388,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(hint)
                 .wrap(Wrap { trim: false })
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::bordered().title(" culm ")),
+                .block(pane_block(" culm ", app.pane() == Pane::Panel)),
             area,
         );
         return;
@@ -341,7 +396,13 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let title = format!(" {} ", entry.name());
     match entry.live.as_ref() {
-        Some(session) => draw_terminal(f, session, title_of(entry.name(), session), area),
+        Some(session) => draw_terminal(
+            f,
+            session,
+            title_of(entry.name(), session),
+            app.pane() == Pane::Panel,
+            area,
+        ),
         None => {
             let mut lines = Vec::new();
             // What the session was doing comes first, because that is what the user
@@ -365,7 +426,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(title)),
+                    .block(pane_block(title, app.pane() == Pane::Panel)),
                 area,
             );
         }
@@ -464,7 +525,7 @@ const WARN_LONG: &str = "markers off, run: culm hooks install";
 const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
-const SHORTCUTS: [(&str, &str); 18] = [
+const SHORTCUTS: [(&str, &str); 20] = [
     ("Alt+0", "focus the shell at position 0"),
     ("Alt+1 to Alt+9", "focus an active session"),
     ("Alt+Shift+N", "create a session"),
@@ -474,6 +535,11 @@ const SHORTCUTS: [(&str, &str); 18] = [
     ("Alt+Shift+X", "delete the focused paused session"),
     ("Alt+Shift+A", "archive the focused session"),
     ("Alt+Shift+L", "list the archive, and restore from it"),
+    ("Alt+Shift+O", "move the keys to the sidebar or the panel"),
+    (
+        "j k, Up Down, Enter",
+        "in the sidebar: move, then show a session",
+    ),
     ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
     ("Alt+Shift+H", "this table"),
     ("Alt+Shift+S", "settings for every project"),
@@ -767,13 +833,19 @@ fn title_of(name: &str, session: &crate::session::Session) -> String {
     }
 }
 
-fn draw_terminal(f: &mut Frame, session: &crate::session::Session, title: String, area: Rect) {
+fn draw_terminal(
+    f: &mut Frame,
+    session: &crate::session::Session,
+    title: String,
+    focused: bool,
+    area: Rect,
+) {
     let guard = match session.parser().lock() {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
     f.render_widget(
-        PseudoTerminal::new(guard.screen()).block(Block::bordered().title(title)),
+        PseudoTerminal::new(guard.screen()).block(pane_block(title, focused)),
         area,
     );
 }
@@ -1045,6 +1117,52 @@ mod tests {
         assert!(screen.contains(" archive "), "{screen}");
         assert!(screen.contains("lost could not be restored"), "{screen}");
         assert!(screen.contains("no archived session"), "{screen}");
+    }
+
+    #[test]
+    fn the_half_that_holds_the_keys_has_the_accent_border() {
+        let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
+        let border_at = |app: &App, x: u16| {
+            let mut terminal =
+                Terminal::new(TestBackend::new(80, 12)).expect("the test backend starts");
+            terminal
+                .draw(|f| {
+                    draw(f, app);
+                })
+                .expect("the screen draws");
+            terminal
+                .backend()
+                .buffer()
+                .cell(Position { x, y: 6 })
+                .map(|cell| cell.fg)
+        };
+        let sidebar = 0;
+        let panel = app.sidebar_width();
+
+        assert_eq!(border_at(&app, panel), Some(Color::Cyan));
+        assert_eq!(border_at(&app, sidebar), Some(Color::DarkGray));
+
+        app.set_pane(Pane::Sidebar);
+        assert_eq!(border_at(&app, sidebar), Some(Color::Cyan));
+        assert_eq!(border_at(&app, panel), Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn the_sidebar_highlight_takes_no_theme_color_for_its_fill_or_its_text() {
+        let paused = Style::default().fg(Color::DarkGray);
+        let marked = with_cursor(paused, true);
+        assert_eq!(marked.bg, Some(CURSOR_FILL));
+        assert_eq!(
+            marked.fg,
+            Some(Color::Reset),
+            "the theme's own foreground, never a palette gray it may share"
+        );
+        let shown = Style::default().fg(Color::Black).bg(Color::Cyan);
+        assert_eq!(
+            with_cursor(shown, true).bg,
+            Some(Color::Cyan),
+            "the row the panel shows keeps its fill"
+        );
     }
 
     #[test]
