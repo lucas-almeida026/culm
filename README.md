@@ -40,7 +40,7 @@ One gap is worth knowing: no hook reports that you answered a permission prompt,
 
 **Keys go through one translation table.** culm asks the terminal for the kitty keyboard protocol and uses it when the answer is yes, because it reports a modified key as a single unambiguous event. A terminal that says no runs the legacy path instead; the protocol is an enhancement and never a requirement. The bottom bar names which mode you got.
 
-**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 296 cases without starting a process, touching disk outside a temporary directory, or sleeping.
+**Every side effect sits behind a trait.** Spawning a process, running git, reading files, reading memory, telling the time, and naming an imported session each have one trait and one fake. Nothing in the core calls `std::process`, `std::fs`, or the clock directly, which is why `cargo test` covers 302 cases without starting a process, touching disk outside a temporary directory, or sleeping.
 
 ## What it is
 

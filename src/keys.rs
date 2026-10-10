@@ -108,7 +108,7 @@ pub fn encode(k: &KeyEvent, cursor: CursorKeys) -> Option<Vec<u8>> {
         // The disambiguated keyboard protocol reports Ctrl+Backspace as Backspace
         // with a modifier, so it would otherwise collapse onto DEL. Kitty sends BS
         // for it, but zsh and bash bind BS to deleting one character. ESC DEL is
-        // `backward-kill-word` in zsh, bash and fish by default, and Claude Code
+        // `backward-kill-word` in zsh and bash by default, and Claude Code
         // deletes a word on it too, checked on 2026-10-10 against Claude Code
         // 2.1.296. It is what Alt+Backspace sends, so Alt adds no second prefix.
         KeyCode::Backspace if ctrl => vec![0x1b, 0x7f],

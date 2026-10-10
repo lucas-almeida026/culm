@@ -1,0 +1,26 @@
+# Changelog
+
+This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). `Cargo.toml` holds the version of each commit.
+
+## [0.1.1] - 2026-10-10
+
+### Added
+
+- **Recap on pause.** The `recap-on-pause` setting keeps a short summary of what a session was doing. When a session pauses, culm runs `claude -p --no-session-persistence --resume <id> /recap` after the child exits. The panel shows the answer above `paused`. A model writes the recap, so the text changes between runs. culm skips the call when no input reached the session since the last recap. The setting is off by default, because each recap costs one model call. If the recap fails or does not answer, the panel shows `no recap was generated for this session`. Evidence: `src/recap.rs` and the recap tests in `tests/session_lifecycle.rs`, for example `pausing_keeps_what_the_session_says_it_was_doing`, `pausing_again_with_nothing_in_between_costs_no_call`, and `a_recap_that_fails_keeps_a_plain_message`.
+- **Settings.** `culm config list` prints every setting. `culm config set <name> <value>` changes one setting. `Alt+Shift+S` opens the same settings in the interface, and `Space` flips a switch and writes the file at once. The file is `$XDG_CONFIG_HOME/culm/config.toml`, or `~/.config/culm/config.toml` when the variable is unset. Evidence: the tests in `src/config.rs`, and `space_flips_the_switch_and_writes_it_at_once` in `tests/session_lifecycle.rs`.
+- **Closing state.** `Ctrl+q` asks every session to exit and shows a spinner until the last session is gone. culm kills a session that is still running after 3 seconds. A second `Ctrl+q` kills every session at once. The next open of the project shows `recovered from forced quit` on the bar for 5 seconds. No key reaches a session while culm closes. Evidence: `a_child_that_ignores_the_request_is_killed_once_the_grace_runs_out`, `a_second_quit_cuts_the_wait_short_and_is_recorded`, and `no_key_reaches_a_child_while_the_interface_closes` in `tests/session_lifecycle.rs`.
+- **Sidebar width per project.** Each project saves its sidebar width in the `view` block of `projects/<slug>.json`. The project opens at the saved width. A width outside 20 to 60 columns is clamped to the nearest limit. A project with no saved width opens at 30 columns. Evidence: `the_width_survives_a_quit_and_a_reopen` and `a_stored_width_outside_the_limits_opens_clamped` in `tests/session_lifecycle.rs`.
+- **Extend a selection.** `Alt` and a click move the end of the selection to the click point and keep the anchor. Two gestures copy a block taller than the panel. Evidence: `alt_click_extends_the_selection_instead_of_starting_a_new_one` in `tests/session_lifecycle.rs`.
+
+### Fixed
+
+- **A selection stays on its text when the panel scrolls.** The wheel and `Shift+PageUp` move the selection by the distance the text moved. A session that scrolls itself, such as Claude Code, reports no distance. For such a session, culm compares the panel rows before and after the scroll and moves the selection by the matched offset. If the rows do not match, culm drops the selection. Evidence: `the_wheel_carries_the_selection_with_the_text_it_marks` and `a_forwarded_wheel_drops_the_selection_when_the_child_drew_a_fresh_screen` in `tests/session_lifecycle.rs`. Known gap: culm cannot copy text that a self-scrolling session moved off its panel.
+- **Home, End, and the arrow keys follow the cursor key mode of the child.** A shell line editor such as zsh switches the terminal to application cursor mode and binds `ESC O H` to Home. culm reads the mode from the screen of the child and sends `ESC O H` and `ESC O F` in that mode. `Shift` and `Ctrl` now reach the child with Home and End, as `ESC [ 1 ; 2 H` and `ESC [ 1 ; 5 F`. Evidence: `home_and_end_reach_a_shell_line_editor_in_its_own_mode` in `tests/session_lifecycle.rs`, and the cursor key tests in `src/keys.rs`.
+- **`Ctrl+Backspace` deletes the word before the cursor.** culm sends `ESC DEL`, the same bytes as `Alt+Backspace`. zsh and bash bind `ESC DEL` to `backward-kill-word` by default. Claude Code 2.1.296 deletes a word on the same bytes. In the insert mode of vim, the `ESC` byte leaves insert mode. Evidence: `control_backspace_deletes_a_word_instead_of_a_character` in `src/keys.rs`.
+
+## [0.1.0] - 2026-09-07
+
+First release. The [release page](https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0) lists the features.
+
+[0.1.1]: https://github.com/lucas-almeida026/culm/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/lucas-almeida026/culm/releases/tag/v0.1.0
