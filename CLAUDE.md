@@ -42,7 +42,7 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 
 ## Not in scope
 
-- Git diff, commit, and push. Worktree and branch management is the only version control work.
+- Any git write other than creating and removing worktrees: commit, push, stage, checkout, merge, and branch deletion. culm reads a repository to show what a session changed, and never changes it.
 - Automatic acceptance of permission prompts.
 - Any change to where the Claude Code CLI writes transcripts.
 - A graphical interface.
@@ -63,6 +63,9 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 | State lives in small JSON files under the XDG state directory. | The files are easy to read, to repair by hand, and to write atomically. |
 | `Alt` is the only leader key. No function key is reserved. | Every reserved key is a key Claude Code loses. |
 | Workspaces name sets of projects. | Reopening the same set of projects every day must cost one command. |
+| culm shows each session's changes in a read-only diff panel. | Reviewing what a session changed is part of every switch between features. A separate git client must be pointed at every worktree by hand. A panel that only reads can never damage a session's work. |
+| The changes panel finds a session's repositories in its transcript. | Projects keep their worktrees in different layouts, and some use none. The files a session wrote name its repositories in every layout, with no rule to configure. |
+| The changes panel reads git when Claude Code finishes a turn. | A turn's edits settle when the turn ends. A read on every tool call shows half-made edits and costs one git call per tool call. |
 | The project is closed to contributions. | culm serves one workflow. A fork serves another. |
 
 ## How to work in this repository

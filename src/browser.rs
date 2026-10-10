@@ -185,7 +185,8 @@ impl Browser {
     /// holds the project.
     fn add_tab(&mut self, project: Project, deps: &Deps<'_>) -> Result<()> {
         let hooks = deps.hooks.listen(&project.slug)?;
-        let (rows, cols) = self.panel_size_for(project.sidebar_width());
+        let (rows, cols) =
+            self.panel_size_for(project.sidebar_width(), crate::gitview::GitSplit::Closed);
         let mut app = App::open(project, deps, rows, cols);
         app.set_config(self.config.clone());
         app.set_nerd_mode(self.nerd_mode);
@@ -200,9 +201,9 @@ impl Browser {
     }
 
     /// The panel of a tab whose sidebar is `sidebar_width` wide, in rows and columns.
-    fn panel_size_for(&self, sidebar_width: u16) -> (u16, u16) {
+    fn panel_size_for(&self, sidebar_width: u16, split: crate::gitview::GitSplit) -> (u16, u16) {
         let (_, body) = ui::split_tab_bar(self.area);
-        ui::panel_size(ui::layout(body, sidebar_width).panel)
+        ui::panel_size(ui::layout(body, sidebar_width, split).panel)
     }
 
     #[must_use]
@@ -457,6 +458,9 @@ impl Browser {
             tab.app.poll_recap(deps);
         }
         self.app_mut().settle_scroll();
+        // Only the visible tab's changes panel reads git. A tab in the background
+        // catches up when it is focused, because the panel follows on focus.
+        self.app_mut().poll_git(deps);
         if self.quitting {
             for tab in &mut self.tabs {
                 tab.app.poll_close(deps)?;
@@ -491,8 +495,8 @@ impl Browser {
     pub fn resize(&mut self, area: Rect) -> Result<()> {
         self.area = area;
         for index in 0..self.tabs.len() {
-            let width = self.tabs[index].app.sidebar_width();
-            let (rows, cols) = self.panel_size_for(width);
+            let app = &self.tabs[index].app;
+            let (rows, cols) = self.panel_size_for(app.sidebar_width(), app.git_split());
             self.tabs[index].app.resize_all(rows, cols)?;
         }
         Ok(())

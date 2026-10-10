@@ -907,6 +907,7 @@ fn session_with_transcript(f: &Fakes) -> App {
     let mut app = App::new(project());
     app.set_config(culm::config::Config {
         recap_on_pause: true,
+        ..culm::config::Config::default()
     });
     app.create_session(&form("one", [false, false]), &f.deps())
         .expect("one starts");
@@ -1031,6 +1032,7 @@ fn a_session_with_no_transcript_is_left_alone() {
     let mut app = App::new(project());
     app.set_config(culm::config::Config {
         recap_on_pause: true,
+        ..culm::config::Config::default()
     });
     app.create_session(&form("one", [false, false]), &f.deps())
         .expect("one starts");

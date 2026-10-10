@@ -96,7 +96,8 @@ Opened several projects without a workspace? culm offers to save them as one whe
 | `Alt+Shift+A` / `Alt+Shift+L` | Archive the session / list the archive |
 | `Alt+Shift+X` | Delete a paused session |
 | `Alt+Shift+F` | Search paused sessions |
-| `Alt+Shift+O` | Move the keys between the sidebar and the session |
+| `Alt+Shift+G` | Show or hide the changes of the session |
+| `Alt+Shift+O` | Move the keys between the sidebar, the session, and the changes |
 | `j` `k` / `Enter` | In the sidebar: move / open the session |
 | `J` `K` | In the sidebar: reorder sessions |
 | `Alt+0` | The project's shell |
@@ -110,6 +111,7 @@ The mouse works too: click a tab or a session, drag to select and copy, middle c
 - **Pause what you are not using.** A paused session frees its memory and resumes with its whole conversation. A project runs up to eight sessions at a time.
 - **Get a recap when you come back.** Run `culm config set recap-on-pause true`, and a paused session tells you what it was doing.
 - **Archive the done work.** Archived sessions leave the sidebar but stay one keystroke away in the archive list.
+- **See what a session changed.** `Alt+Shift+G` opens the diff of every repository the session wrote in, old beside new. Run `culm config set changes-maximized true` to open it over the whole session.
 - **Each session has its own branch.** culm creates a worktree per session and per repository, and never commits, pushes, or deletes a branch for you.
 
 ## Command line

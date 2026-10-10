@@ -10,6 +10,7 @@ use ratatui::layout::{Position, Rect};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::git::Git;
+use crate::gitview::{GitKey, GitSplit, GitView, Owner};
 use crate::hooks::{Attention, HookEvent};
 use crate::keys::{HostAction, host_action};
 use crate::project::{
@@ -52,6 +53,9 @@ const SPINNER_EVERY: u64 = 20;
 /// Seconds a recap may take before culm gives up on it. The model reads a whole
 /// transcript, and a long one is slow.
 const RECAP_LIMIT_SECS: u64 = 45;
+
+/// The switches the settings form shows, one per row.
+pub const SETTINGS_ROWS: usize = 2;
 
 /// How long the report of a forced quit stays on the bar, in seconds.
 const FORCED_QUIT_NOTICE_SECS: u64 = 5;
@@ -111,6 +115,8 @@ pub enum Pane {
     /// The visible session. Keys reach its child.
     #[default]
     Panel,
+    /// The changes panel. Keys move through its lists and its diff.
+    Git,
 }
 
 /// The sidebar row under the keyboard highlight. A session is held by id, because
@@ -297,6 +303,14 @@ pub struct App {
     pane: Pane,
     /// The highlighted sidebar row. `None` follows whatever the panel shows.
     sidebar_cursor: Option<SidebarRow>,
+    /// The changes panel, which follows the visible session.
+    git: GitView,
+    /// True while the left border of the changes panel is dragged.
+    dragging_git: bool,
+    /// True while the rule right of the changes panel's list is dragged.
+    dragging_git_list: bool,
+    /// The settings row under the cursor.
+    settings_cursor: usize,
 }
 
 impl App {
@@ -305,6 +319,11 @@ impl App {
         Self {
             // Read before the project moves into the struct.
             sidebar_width: project.sidebar_width(),
+            git: {
+                let mut git = GitView::default();
+                git.restore(project.view.changes_width, project.view.changes_list);
+                git
+            },
             project,
             entries: Vec::new(),
             shell: None,
@@ -335,6 +354,9 @@ impl App {
             filter_focused: false,
             pane: Pane::Panel,
             sidebar_cursor: None,
+            dragging_git: false,
+            dragging_git_list: false,
+            settings_cursor: 0,
         }
     }
 
@@ -568,7 +590,7 @@ impl App {
         if pane == Pane::Sidebar && self.pane() != Pane::Sidebar {
             self.sidebar_cursor = Some(self.row_of(self.focus()));
         }
-        if pane == Pane::Panel {
+        if pane != Pane::Sidebar {
             // The search box is part of the sidebar, so it lets go of the keys too.
             self.filter_focused = false;
         }
@@ -776,6 +798,12 @@ impl App {
         matches!(self.modal, Some(Modal::Help))
     }
 
+    /// The settings row under the cursor.
+    #[must_use]
+    pub fn settings_cursor(&self) -> usize {
+        self.settings_cursor
+    }
+
     /// True while the settings are on screen.
     #[must_use]
     pub fn settings_open(&self) -> bool {
@@ -950,10 +978,19 @@ impl App {
                 self.focus_shell();
                 self.set_pane(Pane::Panel);
             }
-            Some(HostAction::TogglePane) => match self.pane() {
-                Pane::Sidebar => self.set_pane(Pane::Panel),
-                Pane::Panel => self.set_pane(Pane::Sidebar),
-            },
+            Some(HostAction::TogglePane) => {
+                let next = self.next_pane();
+                self.set_pane(next);
+            }
+            Some(HostAction::ToggleGit) => {
+                self.git.toggle();
+                self.set_pane(if self.git.is_open() {
+                    Pane::Git
+                } else {
+                    Pane::Panel
+                });
+                self.poll_git(deps);
+            }
             Some(HostAction::DeleteSession) => self.open_delete(),
             Some(HostAction::RenameSession) => self.open_rename(),
             Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
@@ -979,6 +1016,10 @@ impl App {
                 }
                 if self.pane == Pane::Sidebar {
                     self.sidebar_key(key);
+                    return Ok(());
+                }
+                if self.pane == Pane::Git {
+                    self.git_key(key, deps);
                     return Ok(());
                 }
                 let cursor = self
@@ -1019,8 +1060,9 @@ impl App {
             self.filter.push_str(text);
             return Ok(());
         }
-        // The keys are in the sidebar, so the paste is not the session's either.
-        if self.pane == Pane::Sidebar {
+        // The keys are in the sidebar or the changes panel, so the paste is not the
+        // session's either.
+        if matches!(self.pane, Pane::Sidebar | Pane::Git) {
             return Ok(());
         }
         let bytes = crate::keys::encode_paste(text);
@@ -1328,9 +1370,21 @@ impl App {
                 return Ok(());
             }
             Some(Modal::Settings) => {
-                // Space flips the switch the cursor is on, which is the only one.
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                        self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                        self.settings_cursor = (self.settings_cursor + 1).min(SETTINGS_ROWS - 1);
+                    }
+                    _ => {}
+                }
+                // Space flips the switch the cursor is on.
                 if key.code == KeyCode::Char(' ') {
-                    self.config.recap_on_pause = !self.config.recap_on_pause;
+                    match self.settings_cursor {
+                        0 => self.config.recap_on_pause = !self.config.recap_on_pause,
+                        _ => self.config.changes_maximized = !self.config.changes_maximized,
+                    }
                     // Settings are global, so they are written at once rather than
                     // waiting on a project to be saved.
                     deps.store.save_config(&self.config)?;
@@ -1918,6 +1972,12 @@ impl App {
     /// Marks the session the hook belongs to. A payload for an unknown session is
     /// dropped, because every Claude Code session on the machine runs the hook.
     pub fn on_hook(&mut self, event: &HookEvent) {
+        // A finished turn is when the session's changes settle, so that is when the
+        // changes panel reads git again. Reading on every tool call would show half
+        // made edits and cost a git call each.
+        if event.hook_event_name == "Stop" && self.git.follows(&event.session_id) {
+            self.git.mark_stale();
+        }
         if let Some(entry) = self
             .entries
             .iter_mut()
@@ -2077,9 +2137,14 @@ impl App {
         {
             if hit.in_sidebar(at) {
                 self.set_pane(Pane::Sidebar);
+            } else if hit.git.as_ref().is_some_and(|g| g.area.contains(at)) {
+                self.set_pane(Pane::Git);
             } else if hit.panel.contains(at) {
                 self.set_pane(Pane::Panel);
             }
+        }
+        if self.git_mouse(kind, at, hit, deps) {
+            return;
         }
         match kind {
             MouseEventKind::Down(MouseButton::Left)
@@ -2142,6 +2207,8 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.dragging = false;
+                self.dragging_git = false;
+                self.dragging_git_list = false;
                 self.finish_selection();
             }
             MouseEventKind::Down(MouseButton::Middle)
@@ -2162,6 +2229,178 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The mouse over the changes panel and its border. True when the event was the
+    /// panel's.
+    fn git_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        at: Position,
+        hit: &crate::ui::HitBox,
+        deps: &Deps<'_>,
+    ) -> bool {
+        if self.modal.is_some() {
+            return false;
+        }
+        let Some(git) = hit.git.as_ref() else {
+            return false;
+        };
+        match kind {
+            // A maximized panel has no session beside it, so its border moves
+            // nothing.
+            MouseEventKind::Down(MouseButton::Left)
+                if git.separator_col == Some(at.x)
+                    && git.area.contains(at)
+                    && self.git_split() != GitSplit::Full =>
+            {
+                self.dragging_git = true;
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if git.list_rule_col == Some(at.x) && git.body.contains(at) =>
+            {
+                self.dragging_git_list = true;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_git => {
+                // The panel ends at the right edge, so its width is what lies right
+                // of the pointer, as a share of the room right of the sidebar.
+                let right = git.area.x.saturating_add(git.area.width);
+                let room = right.saturating_sub(self.sidebar_width).max(1);
+                let width = right.saturating_sub(at.x);
+                let percent =
+                    u16::try_from(u32::from(width) * 100 / u32::from(room)).unwrap_or(u16::MAX);
+                // The sizes are saved on the next tick, as the sidebar width is.
+                if self.git.set_width(percent) {
+                    self.dirty = true;
+                }
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_git_list => {
+                if self.git.drag_list_to(at.x, git.body) {
+                    self.dirty = true;
+                }
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) if git.area.contains(at) => {
+                self.git.on_click(at, git, deps.git);
+                true
+            }
+            MouseEventKind::ScrollUp if git.area.contains(at) => {
+                self.git.on_wheel(true, at, git);
+                true
+            }
+            MouseEventKind::ScrollDown if git.area.contains(at) => {
+                self.git.on_wheel(false, at, git);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The changes panel.
+    #[must_use]
+    pub fn git(&self) -> &GitView {
+        &self.git
+    }
+
+    /// Where the changes panel sits.
+    #[must_use]
+    pub fn git_split(&self) -> GitSplit {
+        self.git.split(self.config.changes_maximized)
+    }
+
+    /// The next pane `Alt+Shift+O` gives the keys to: the sidebar, the session when
+    /// it is on screen, and the changes panel when it is open.
+    fn next_pane(&self) -> Pane {
+        let order = [Pane::Sidebar, Pane::Panel, Pane::Git];
+        let shown = |p: &Pane| match p {
+            Pane::Sidebar => true,
+            Pane::Panel => self.git_split() != GitSplit::Full,
+            Pane::Git => self.git.is_open(),
+        };
+        let at = order.iter().position(|p| *p == self.pane()).unwrap_or(0);
+        (1..=order.len())
+            .filter_map(|step| order.get((at + step) % order.len()))
+            .find(|p| shown(p))
+            .copied()
+            .unwrap_or(Pane::Panel)
+    }
+
+    /// The repositories the changes panel shows, each with its tab label.
+    ///
+    /// For a session: the worktrees culm made for it, then every repository the
+    /// session wrote a file in, read from its transcript. No layout rule is needed,
+    /// so a project that keeps worktrees anywhere, or none, works the same. For the
+    /// shell: the repositories registered with the project.
+    fn panel_repositories(&mut self, deps: &Deps<'_>) -> Vec<(String, std::path::PathBuf)> {
+        // A worktree culm made carries the repository's name. Any other tab is named
+        // by its directory.
+        let mut paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
+        match self.visible() {
+            Some(entry) => {
+                paths.extend(
+                    entry
+                        .record
+                        .repos
+                        .iter()
+                        .map(|r| (Some(r.name.clone()), r.worktree.clone())),
+                );
+                let dir = crate::project::transcript_dir_name(&entry.record.cwd);
+                let files = deps
+                    .store
+                    .read_transcript(&dir, &entry.record.id)
+                    .map(|text| crate::transcript::edited_files(&text))
+                    .unwrap_or_default();
+                for top in self.git.repositories_of(&files, deps.git) {
+                    if !paths.iter().any(|(_, p)| *p == top) {
+                        paths.push((None, top));
+                    }
+                }
+            }
+            None => paths.extend(
+                self.project
+                    .repos
+                    .iter()
+                    .map(|r| (Some(r.name.clone()), r.path.clone())),
+            ),
+        }
+        label_repositories(&paths, &self.project.root)
+    }
+
+    fn git_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) {
+        let left = self.git.on_key(key, deps.git) == GitKey::Leave;
+        // `r` asks for a read, which needs the tabs worked out again first.
+        self.poll_git(deps);
+        if left {
+            let back = if self.git_split() == GitSplit::Full {
+                Pane::Sidebar
+            } else {
+                Pane::Panel
+            };
+            self.set_pane(back);
+        }
+    }
+
+    /// Points the changes panel at what the user looks at, and reads git when
+    /// something asked for it. The loop calls this every pass, and it costs nothing
+    /// until the focus moves, a turn ends, or the panel opens.
+    pub fn poll_git(&mut self, deps: &Deps<'_>) {
+        if !self.git.is_open() {
+            return;
+        }
+        let owner = match self.visible() {
+            Some(entry) => Owner::Session(entry.record.id.clone()),
+            None => Owner::Shell,
+        };
+        self.git.follow(owner);
+        if self.git.wants_read() {
+            let repos = self.panel_repositories(deps);
+            self.git.set_repos(repos);
+        }
+        self.git.refresh(deps.git, deps.clock.now_secs());
+        self.git.poll_colors();
     }
 
     /// Reads the text under the selection when the button comes up.
@@ -2275,8 +2514,42 @@ impl App {
         self.dirty = false;
         self.project.sessions = self.entries.iter().map(|e| e.record.clone()).collect();
         self.project.view.sidebar_width = self.sidebar_width;
+        self.project.view.changes_width = self.git.width();
+        self.project.view.changes_list = self.git.list_width();
         deps.store.save_project(&self.project)
     }
+}
+
+/// Names each repository tab by its directory. Two tabs with the same directory
+/// name, such as a main checkout and its worktree, are named by their path from the
+/// project root instead, or by their full path when they sit outside it.
+fn label_repositories(
+    paths: &[(Option<String>, std::path::PathBuf)],
+    root: &std::path::Path,
+) -> Vec<(String, std::path::PathBuf)> {
+    let short = |(name, path): &(Option<String>, std::path::PathBuf)| {
+        name.clone().unwrap_or_else(|| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+    };
+    paths
+        .iter()
+        .map(|entry| {
+            let name = short(entry);
+            let path = &entry.1;
+            let clash = paths.iter().filter(|p| short(p) == name).count() > 1;
+            let label = if clash {
+                path.strip_prefix(root)
+                    .map_or_else(|_| path.display().to_string(), |r| r.display().to_string())
+            } else {
+                name
+            };
+            (label, path.clone())
+        })
+        .collect()
 }
 
 /// A screen position as a cell inside the panel, clamped to the panel.

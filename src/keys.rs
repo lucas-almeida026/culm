@@ -32,6 +32,8 @@ pub enum HostAction {
     CloseTab,
     MoveTabLeft,
     MoveTabRight,
+    /// Opens the changes panel, or closes it.
+    ToggleGit,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -88,6 +90,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('w') if shift => Some(HostAction::CloseTab),
         KeyCode::Char('O') => Some(HostAction::TogglePane),
         KeyCode::Char('o') if shift => Some(HostAction::TogglePane),
+        KeyCode::Char('G') => Some(HostAction::ToggleGit),
+        KeyCode::Char('g') if shift => Some(HostAction::ToggleGit),
         _ => None,
     }
 }

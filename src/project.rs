@@ -22,6 +22,14 @@ pub struct View {
     /// reads as the default.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
+    /// The share of the room beside the sidebar the changes panel takes, in
+    /// percent. `None` until the user drags it, which reads as half.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_width: Option<u16>,
+    /// The share of the changes panel its file list takes, in percent. `None`
+    /// until the user drags it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_list: Option<u16>,
 }
 
 // The derived default would be zero, which is not a width the interface allows.
@@ -29,6 +37,8 @@ impl Default for View {
     fn default() -> Self {
         Self {
             sidebar_width: SIDEBAR_DEFAULT,
+            changes_width: None,
+            changes_list: None,
         }
     }
 }

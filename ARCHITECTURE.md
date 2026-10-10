@@ -12,7 +12,7 @@ The process holds one hierarchy:
 | --- | --- | --- |
 | Window | `Browser` in `src/browser.rs` | Up to eight tabs, the window's own forms, the settings, nerd mode, and the last copy. |
 | Tab | `Tab` in `src/browser.rs` | One `App`, and the channel that carries that project's hooks. |
-| Project | `App` in `src/app.rs` | The sessions, the shell, the two panes, the sidebar width, the project's forms, and its bottom bar message. |
+| Project | `App` in `src/app.rs` | The sessions, the shell, the panes, the changes panel, the sidebar width, the project's forms, and its bottom bar message. |
 | Session | `Entry` in `src/app.rs` | The saved record, the running `Session` if any, the attention marker, and the memory sample. |
 | Child | `Session` in `src/session.rs` | One pseudoterminal, one `vt100` parser, and one drain thread. |
 
@@ -37,11 +37,14 @@ The process holds one hierarchy:
 | `src/cli.rs` | The command line. Every project, repository, and workspace operation. |
 | `src/recap.rs` | The headless recap child, behind `Recapper`. |
 | `src/namer.rs` | The headless child that names an imported session, behind `Namer`. |
-| `src/transcript.rs` | Reads the head of a Claude Code transcript for an import. |
+| `src/transcript.rs` | Reads a Claude Code transcript: its head for an import, and the files a session wrote for the changes panel. |
 | `src/config.rs` | The settings that apply to every project. |
 | `src/stats.rs` | Memory sampling from `/proc`, behind `MemoryProbe`. |
 | `src/clock.rs` | The time, behind `Clock`. |
-| `src/git.rs` | Worktree commands, behind `Git`. |
+| `src/git.rs` | Worktree commands and the read-only git reads of the changes panel, behind `Git`. |
+| `src/diff.rs` | The changes panel's data: git's output parsed, two versions of a file laid side by side, and syntax colors. Pure functions, except the color grammars it loads. |
+| `src/gitview.rs` | The state of the changes panel: repository tabs, lists, picks, the diff on screen, keys, and clicks. |
+| `src/gitui.rs` | Draws the changes panel. |
 | `src/clipboard.rs` | The OSC 52 escape. |
 | `src/testing.rs` | The fakes. Compiled into the library, so the tests under `tests/` reach them. |
 
@@ -50,7 +53,7 @@ The process holds one hierarchy:
 `src/main.rs` runs one loop. Each pass does these steps in order:
 
 1. Wait up to 4 ms for a terminal event. A key, a paste, or a mouse event goes to `Browser`. After a mouse event, the loop writes a finished copy to the terminal as OSC 52.
-2. `Browser::poll`: drain the hook channel of every tab, carry every recap forward, measure a forwarded scroll on the focused tab, and carry every close forward.
+2. `Browser::poll`: drain the hook channel of every tab, carry every recap forward, measure a forwarded scroll on the focused tab, let the changes panel of the focused tab read git when something asked for it, and carry every close forward.
 3. Once a second, `Browser::on_tick`: reap a child that ended, sample memory, restart an exited shell, and save a project with unsaved changes.
 4. Draw at most once per 8 ms. A session that prints at full speed never drives the frame rate.
 5. Resize every tab's sessions to that tab's panel, the tabs not on screen included.
@@ -110,9 +113,9 @@ Each project starts `$SHELL` at its root, at the top of its sidebar. The shell u
 
 ### Panes
 
-Each project has two panes: the sidebar and the panel. One pane holds the keys.
+Each project has up to three panes: the sidebar, the panel, and the changes panel while it is open. One pane holds the keys. `Alt+Shift+O` steps through the panes on screen, and skips the panel while the changes panel covers it.
 
-- While the sidebar holds the keys, no key and no paste reaches a child.
+- While the sidebar or the changes panel holds the keys, no key and no paste reaches a child.
 - The keys follow the mouse. A move, a drag, or a press over a pane gives that pane the keys.
 - A drag of the separator never moves the keys.
 - `HitBox::in_sidebar` counts only the rows the panel spans, so the tab bar row is never part of the sidebar.
@@ -145,7 +148,7 @@ culm turns on full mouse reporting, so the terminal reports every move.
 | File | Holds |
 | --- | --- |
 | `$XDG_STATE_HOME/culm/registry.json` | Every project: slug and root. |
-| `$XDG_STATE_HOME/culm/projects/<slug>.json` | One project: root, repositories, session records, and the `view` block with the sidebar width. |
+| `$XDG_STATE_HOME/culm/projects/<slug>.json` | One project: root, repositories, session records, and the `view` block. The `view` block holds the sidebar width in columns, and the shares of the changes panel and its list in percent once the user dragged them. |
 | `$XDG_STATE_HOME/culm/workspaces.json` | Every workspace: name and project slugs, in tab order. |
 | `$XDG_CONFIG_HOME/culm/config.toml` | The settings for every project. A missing file reads as the defaults. |
 
@@ -158,6 +161,17 @@ culm turns on full mouse reporting, so the terminal reports every move.
 ## Worktrees
 
 A session that edits a repository gets `git worktree add -b <session-slug>` under `<project root>/.worktrees/<repo>-<session-slug>`. Each chosen repository gets one worktree, and every worktree of the session shares one branch name. A rename changes the displayed name only, because a running session holds its paths open. culm creates and removes worktrees. It never commits, never pushes, and never deletes a branch.
+
+## The changes panel
+
+`Alt+Shift+G` opens a read-only panel that shows what the visible session changed. It never writes to a repository.
+
+- **Tabs:** one tab per repository of the visible session. The worktrees culm made for the session come first. Every other repository the session wrote a file in follows, in the order the session first wrote in it. `transcript::edited_files` reads the written files from the transcript, and `Git::toplevel` names the repository that holds each one. The shell's panel shows the repositories registered with the project.
+- **Lists:** "Changes" lists every file that differs from `HEAD`, from `git status --porcelain=v2`. "History" lists the last 200 commits of `HEAD`, and beside them the files of the picked commit, against its first parent.
+- **Reads:** the panel reads the transcript and git when it opens, when the visible session changes, when the followed session sends `Stop`, and on `r`. No other event reads anything. A hook for another session reads nothing.
+- **Diff:** `diff::side_by_side` lays the old version left and the new version right, three lines of context around each change. A removed line beside an added line is a pair, and the words that differ are marked. A file over 1 MiB or a binary file shows a notice instead.
+- **Colors:** a thread computes the syntax colors of both versions, because coloring costs about 0.1 ms per line. The diff shows plain until the colors land. A file over 256 KiB gets no colors.
+- **Size:** the panel opens on half of the room right of the sidebar, or over the whole session when `changes-maximized` is on. The panel's share and its list's share are dragged and saved per project. The list stays between 20 and 40 columns, and the history between 32 and 64.
 
 ## Closing
 
@@ -187,9 +201,15 @@ These hold today. A change that breaks one of them breaks culm in a way no test 
 - `--resume <uuid>` works only from the working directory the transcript was written in. A session's `cwd` therefore never changes after creation.
 - A session with no transcript has never received a prompt. A restore from the archive treats a missing transcript as a session that is gone.
 - The hook payload carries `session_id`, `hook_event_name`, `tool_name`, and `notification_type`. culm reads no other field.
+- A transcript line that calls a tool holds a `tool_use` block with `name` and `input`. `Edit`, `MultiEdit`, and `Write` name their file in `input.file_path`, and `NotebookEdit` in `input.notebook_path`. A file a session changes through a shell command appears in no such block, so its repository gets no tab until the session also writes there through a tool.
 - Claude Code asks for mouse reporting and paints its own viewport. Nothing scrolls off its screen, so `vt100` holds no scrollback for it.
 - Claude Code on Linux reads byte `0x08` as `Ctrl+Backspace` and `ESC DEL` as `Meta+Backspace`. Both delete a word.
 - Claude Code reads both `ESC [ H` and `ESC O H` as `Home`, and does not set DECCKM.
+
+### About git
+
+- `git` is on the `PATH`, and is version 2.31 or later, for `--diff-merges=first-parent`.
+- Every git read of the changes panel runs on the interface thread. A slow repository stalls the frame for the time git takes.
 
 ### About the terminal
 

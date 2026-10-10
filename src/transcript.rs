@@ -69,6 +69,74 @@ pub fn scan(id: &str, text: &str) -> TranscriptHead {
     head
 }
 
+/// The tools that write a file, and the input field that names it.
+const WRITING_TOOLS: [(&str, &str); 4] = [
+    ("Edit", "file_path"),
+    ("MultiEdit", "file_path"),
+    ("Write", "file_path"),
+    ("NotebookEdit", "notebook_path"),
+];
+
+/// Every file the session wrote through a tool, in the order it first wrote it.
+///
+/// This is how culm learns which repositories a session changed, whatever layout a
+/// project keeps its worktrees in, or whether it uses worktrees at all. A file the
+/// session changed through a shell command is not seen. A relative path is read
+/// against the working directory of its line.
+#[must_use]
+pub fn edited_files(text: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for line in text.lines() {
+        // Most lines carry no tool call, and parsing them would cost most of the
+        // pass.
+        if !line.contains("\"tool_use\"")
+            || !(line.contains("\"file_path\"") || line.contains("\"notebook_path\""))
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let cwd = value.get("cwd").and_then(Value::as_str).map(PathBuf::from);
+        let Some(blocks) = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+            let Some(field) = WRITING_TOOLS
+                .iter()
+                .find(|(tool, _)| *tool == name)
+                .map(|(_, field)| *field)
+            else {
+                continue;
+            };
+            let Some(path) = block
+                .get("input")
+                .and_then(|i| i.get(field))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let path = PathBuf::from(path);
+            let path = match (&cwd, path.is_absolute()) {
+                (Some(cwd), false) => cwd.join(path),
+                _ => path,
+            };
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
 /// Takes the working directory and, when the line carries one, the first prompt.
 ///
 /// A sidechain line belongs to a subagent, and a meta line is a caveat culm did not
@@ -247,6 +315,42 @@ mod tests {
         let head = scan("id-1", r#"{"type":"mode","mode":"normal"}"#);
         assert_eq!(head.custom_title, None);
         assert_eq!(head.first_prompt, None);
+    }
+
+    fn tool_line(cwd: &str, name: &str, field: &str, path: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "message": {"content": [
+                {"type": "text", "text": "editing"},
+                {"type": "tool_use", "name": name, "input": {field: path}}
+            ]}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn edited_files_come_from_every_writing_tool_in_first_seen_order() {
+        let text = [
+            tool_line("/p", "Edit", "file_path", "/p/.wt/A/api/src/a.rs"),
+            tool_line("/p", "Read", "file_path", "/p/elsewhere/read-only.rs"),
+            tool_line("/p", "Write", "file_path", "/p/docs/new.md"),
+            tool_line("/p", "Edit", "file_path", "/p/.wt/A/api/src/a.rs"),
+            tool_line("/p/app", "NotebookEdit", "notebook_path", "nb.ipynb"),
+        ]
+        .join("\n");
+
+        let files = edited_files(&text);
+
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/p/.wt/A/api/src/a.rs"),
+                PathBuf::from("/p/docs/new.md"),
+                PathBuf::from("/p/app/nb.ipynb"),
+            ],
+            "a read is not an edit, a repeat counts once, a relative path joins its cwd"
+        );
     }
 
     #[test]

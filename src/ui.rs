@@ -13,6 +13,7 @@ use crate::app::{
     Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Pane, Rename,
 };
 use crate::browser::{Browser, BrowserHit, BrowserModal, Picker, SaveChoice, SavePrompt};
+use crate::gitview::{GIT_MIN_WIDTH, GitSplit};
 use crate::hooks::Attention;
 use crate::stats::format_bytes;
 
@@ -31,6 +32,8 @@ pub struct HitBox {
     pub search_row: Option<u16>,
     /// Where each button of the open confirmation sits. A click answers it.
     pub buttons: Vec<(Rect, Answer)>,
+    /// The changes panel, when it is open.
+    pub git: Option<crate::gitview::GitHit>,
 }
 
 impl HitBox {
@@ -54,6 +57,7 @@ impl Default for HitBox {
             inner: Rect::new(0, 0, 0, 0),
             search_row: None,
             buttons: Vec::new(),
+            git: None,
         }
     }
 }
@@ -69,7 +73,7 @@ fn color_of(attention: Attention) -> Color {
 
 /// The border of one half of the screen. The half that holds the keys is drawn in
 /// the accent color, so the user always sees where a keystroke will land.
-fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
+pub(crate) fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
@@ -372,7 +376,10 @@ fn centered(panel: Rect, width: u16, height: u16) -> Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppLayout {
     pub sidebar: Rect,
+    /// The session. Under the changes panel when the panel takes the whole room,
+    /// and still sized, so the session keeps a size to run at.
     pub panel: Rect,
+    pub git: Option<Rect>,
     pub status: Rect,
 }
 
@@ -381,14 +388,38 @@ pub struct AppLayout {
 /// Pure, so the event loop sizes a session that is not on screen with the same
 /// arithmetic the frame uses to draw it.
 #[must_use]
-pub fn layout(area: Rect, sidebar_width: u16) -> AppLayout {
+pub fn layout(area: Rect, sidebar_width: u16, split: GitSplit) -> AppLayout {
     let vertical = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
     let (body, status) = (vertical[0], vertical[1]);
     let columns =
         Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(10)]).split(body);
+    let room = columns[1];
+    let (panel, git) = match split {
+        GitSplit::Closed => (room, None),
+        GitSplit::Full => (room, Some(room)),
+        GitSplit::Beside(percent) => {
+            // A share of the room, and never so wide that the session loses its
+            // last columns.
+            let width = u16::try_from(u32::from(room.width) * u32::from(percent) / 100)
+                .unwrap_or(room.width)
+                .min(room.width.saturating_sub(10))
+                .max(GIT_MIN_WIDTH.min(room.width / 2));
+            let panel = Rect {
+                width: room.width.saturating_sub(width),
+                ..room
+            };
+            let git = Rect {
+                x: room.x.saturating_add(panel.width),
+                width,
+                ..room
+            };
+            (panel, Some(git))
+        }
+    };
     AppLayout {
         sidebar: columns[0],
-        panel: columns[1],
+        panel,
+        git,
         status,
     }
 }
@@ -408,14 +439,21 @@ pub fn draw_app(f: &mut Frame, app: &App, area: Rect) -> HitBox {
     let AppLayout {
         sidebar,
         panel,
+        git,
         status,
-    } = layout(area, app.sidebar_width());
+    } = layout(area, app.sidebar_width(), app.git_split());
+    let full = app.git_split() == GitSplit::Full;
 
     let (rows, search_row) = draw_sidebar(f, app, sidebar);
-    draw_panel(f, app, panel);
-    if let Some((start, end)) = app.selection() {
-        highlight(f, inner_of(panel), start, end);
+    if !full {
+        draw_panel(f, app, panel);
+        if let Some((start, end)) = app.selection() {
+            highlight(f, inner_of(panel), start, end);
+        }
     }
+    let git = git.map(|rect| crate::gitui::draw_git(f, app.git(), rect, app.pane() == Pane::Git));
+    // Under a panel that takes the whole room, the session answers no click.
+    let panel = if full { Rect::default() } else { panel };
     draw_status(f, app, status);
     if app.nerd_mode() {
         draw_fps(f, app, panel);
@@ -439,6 +477,7 @@ pub fn draw_app(f: &mut Frame, app: &App, area: Rect) -> HitBox {
         inner: inner_of(panel),
         search_row,
         buttons,
+        git,
     }
 }
 
@@ -617,7 +656,7 @@ fn entry_line(entry: &Entry, focused: bool, cursor: bool, inner_width: usize) ->
 /// so a highlight drawn with those two hides its own text. A theme rarely touches
 /// the ramp, so this fill stays dark, and the text takes the terminal's own
 /// foreground, which every theme keeps readable against a dark fill.
-const CURSOR_FILL: Color = Color::Indexed(237);
+pub(crate) const CURSOR_FILL: Color = Color::Indexed(237);
 
 /// Marks the row under the keyboard highlight. The row the panel shows keeps its
 /// own fill, so the two read apart when they differ.
@@ -633,7 +672,7 @@ fn with_cursor(base: Style, cursor: bool) -> Style {
     }
 }
 
-fn truncate(text: &str, room: usize) -> String {
+pub(crate) fn truncate(text: &str, room: usize) -> String {
     if text.chars().count() <= room {
         return text.to_string();
     }
@@ -820,9 +859,9 @@ const SHORTCUTS: [(&str, &str); 21] = [
     ("Alt+Shift+R", "rename the focused session"),
     ("Alt+Shift+F", "search the paused list"),
     ("Alt+Shift+X", "delete the focused paused session"),
-    ("Alt+Shift+A", "archive the focused session"),
-    ("Alt+Shift+L", "list the archive, and restore from it"),
-    ("Alt+Shift+O", "move the keys to the sidebar or the panel"),
+    ("Alt+Shift+A, L", "archive the session, list the archive"),
+    ("Alt+Shift+G", "open or close the changes panel"),
+    ("Alt+Shift+O", "move the keys to the next pane"),
     (
         "j k, Up Down, Enter",
         "in the sidebar: move, then show a session",
@@ -841,31 +880,41 @@ const SHORTCUTS: [(&str, &str); 21] = [
 ];
 
 /// The shortcut table. Everything else the bar used to list lives here.
-/// The settings that apply to every project. One switch so far.
+/// The settings that apply to every project, one switch per row.
 fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
-    let width = 64.min(panel.width.saturating_sub(2));
-    let height = 7.min(panel.height);
+    let width = 70.min(panel.width.saturating_sub(2));
+    // Nine lines of content, plus the two border rows.
+    let height = 11.min(panel.height);
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
         y: panel.y + (panel.height.saturating_sub(height)) / 2,
         width,
         height,
     };
-    let on = app.config().recap_on_pause;
+    let switch = |on: bool, row: usize| {
+        let style = if app.settings_cursor() == row {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        Span::styled(if on { " [x] " } else { " [ ] " }, style)
+    };
+    let config = app.config();
     let lines = vec![
         Line::from(vec![
-            // The cursor has nowhere else to be, so the only row is always the one.
-            Span::styled(
-                if on { " [x] " } else { " [ ] " },
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            ),
+            switch(config.recap_on_pause, 0),
             Span::raw("  store a recap before pausing a session"),
         ]),
+        dim("        a paused session then says what it was doing."),
+        dim("        each pause costs one call to the model."),
         Line::from(""),
-        dim("  a paused session then says what it was doing."),
-        dim("  each pause costs one call to the model."),
+        Line::from(vec![
+            switch(config.changes_maximized, 1),
+            Span::raw("  open the changes panel maximized"),
+        ]),
+        dim("        it then covers the session instead of sitting beside it."),
         Line::from(""),
-        dim(" Space toggles   Esc closes"),
+        dim(" Up Down move   Space toggles   Esc closes"),
     ];
     f.render_widget(Clear, area);
     f.render_widget(

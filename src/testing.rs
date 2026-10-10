@@ -408,6 +408,20 @@ pub struct FakeGit {
     removed: Arc<Mutex<Vec<std::path::PathBuf>>>,
     dirty: Arc<Mutex<Vec<std::path::PathBuf>>>,
     fail: Arc<AtomicBool>,
+    repos: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, FakeRepo>>>,
+    toplevels: Arc<Mutex<Vec<std::path::PathBuf>>>,
+}
+
+/// What one worktree answers to the reads of the changes panel. Every field holds
+/// the bytes git would print, so the parsers meet the real format.
+#[derive(Debug, Clone, Default)]
+struct FakeRepo {
+    status: Vec<u8>,
+    log: Vec<u8>,
+    commit_files: std::collections::HashMap<String, Vec<u8>>,
+    blobs: std::collections::HashMap<(String, String), Vec<u8>>,
+    files: std::collections::HashMap<String, Vec<u8>>,
+    status_reads: usize,
 }
 
 /// One call to `Git::worktree_add`.
@@ -439,6 +453,57 @@ impl FakeGit {
     pub fn mark_dirty(&self, path: impl Into<std::path::PathBuf>) {
         lock(&self.dirty).push(path.into());
     }
+
+    fn with_repo(&self, worktree: &std::path::Path, f: impl FnOnce(&mut FakeRepo)) {
+        f(lock(&self.repos).entry(worktree.to_path_buf()).or_default());
+    }
+
+    /// Sets what `git status --porcelain=v2 -z` prints in this worktree.
+    pub fn set_status(&self, worktree: &std::path::Path, out: &[u8]) {
+        self.with_repo(worktree, |r| r.status = out.to_vec());
+    }
+
+    /// Sets what `git log` prints in this worktree.
+    pub fn set_log(&self, worktree: &std::path::Path, out: &[u8]) {
+        self.with_repo(worktree, |r| r.log = out.to_vec());
+    }
+
+    /// Sets the files one commit changed, as `--name-status -z` prints them.
+    pub fn set_commit_files(&self, worktree: &std::path::Path, sha: &str, out: &[u8]) {
+        self.with_repo(worktree, |r| {
+            r.commit_files.insert(sha.to_string(), out.to_vec());
+        });
+    }
+
+    /// Stores the content of a file at a revision.
+    pub fn set_blob(&self, worktree: &std::path::Path, rev: &str, path: &str, text: &str) {
+        self.with_repo(worktree, |r| {
+            r.blobs.insert(
+                (rev.to_string(), path.to_string()),
+                text.as_bytes().to_vec(),
+            );
+        });
+    }
+
+    /// Stores the content of a file in the working tree.
+    pub fn set_working_file(&self, worktree: &std::path::Path, path: &str, text: &str) {
+        self.with_repo(worktree, |r| {
+            r.files.insert(path.to_string(), text.as_bytes().to_vec());
+        });
+    }
+
+    /// Makes `root` the top of a repository, so every path under it belongs to it.
+    pub fn add_toplevel(&self, root: impl Into<std::path::PathBuf>) {
+        lock(&self.toplevels).push(root.into());
+    }
+
+    /// How many times culm read the status of this worktree.
+    #[must_use]
+    pub fn status_reads(&self, worktree: &std::path::Path) -> usize {
+        lock(&self.repos)
+            .get(worktree)
+            .map_or(0, |r| r.status_reads)
+    }
 }
 
 impl crate::git::Git for FakeGit {
@@ -466,6 +531,50 @@ impl crate::git::Git for FakeGit {
     fn worktree_remove(&self, _repo: &std::path::Path, path: &std::path::Path) -> Result<()> {
         lock(&self.removed).push(path.to_path_buf());
         Ok(())
+    }
+
+    fn status(&self, worktree: &std::path::Path) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.with_repo(worktree, |r| {
+            r.status_reads += 1;
+            out = r.status.clone();
+        });
+        Ok(out)
+    }
+
+    fn log(&self, worktree: &std::path::Path, _limit: usize) -> Result<Vec<u8>> {
+        Ok(lock(&self.repos)
+            .get(worktree)
+            .map(|r| r.log.clone())
+            .unwrap_or_default())
+    }
+
+    fn commit_files(&self, worktree: &std::path::Path, sha: &str) -> Result<Vec<u8>> {
+        Ok(lock(&self.repos)
+            .get(worktree)
+            .and_then(|r| r.commit_files.get(sha).cloned())
+            .unwrap_or_default())
+    }
+
+    fn blob(&self, worktree: &std::path::Path, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(lock(&self.repos)
+            .get(worktree)
+            .and_then(|r| r.blobs.get(&(rev.to_string(), path.to_string())).cloned()))
+    }
+
+    fn toplevel(&self, path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+        // The deepest root wins, as git finds the nearest repository.
+        Ok(lock(&self.toplevels)
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .cloned())
+    }
+
+    fn working_file(&self, worktree: &std::path::Path, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(lock(&self.repos)
+            .get(worktree)
+            .and_then(|r| r.files.get(path).cloned()))
     }
 }
 

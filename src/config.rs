@@ -16,16 +16,22 @@ pub struct Config {
     ///
     /// Off by default, because every pause then costs one call to the model.
     pub recap_on_pause: bool,
+    /// Open the changes panel over the whole session instead of beside it.
+    pub changes_maximized: bool,
 }
 
 /// The name a setting carries on the command line and in the file.
 pub const RECAP_ON_PAUSE: &str = "recap-on-pause";
+pub const CHANGES_MAXIMIZED: &str = "changes-maximized";
 
 impl Config {
     /// Every setting and its current value, in the order the listing shows them.
     #[must_use]
     pub fn settings(&self) -> Vec<(&'static str, String)> {
-        vec![(RECAP_ON_PAUSE, self.recap_on_pause.to_string())]
+        vec![
+            (RECAP_ON_PAUSE, self.recap_on_pause.to_string()),
+            (CHANGES_MAXIMIZED, self.changes_maximized.to_string()),
+        ]
     }
 
     /// Applies one setting by the name the command line uses.
@@ -36,6 +42,10 @@ impl Config {
         match key {
             RECAP_ON_PAUSE => {
                 self.recap_on_pause = parse_bool(value).ok_or(SetError::Value)?;
+                Ok(())
+            }
+            CHANGES_MAXIMIZED => {
+                self.changes_maximized = parse_bool(value).ok_or(SetError::Value)?;
                 Ok(())
             }
             _ => Err(SetError::Key),
@@ -73,6 +83,16 @@ mod tests {
     }
 
     #[test]
+    fn the_changes_panel_opens_beside_the_session_until_asked_otherwise() {
+        let mut config = Config::default();
+        assert!(!config.changes_maximized);
+        config
+            .set(CHANGES_MAXIMIZED, "on")
+            .expect("a known setting");
+        assert!(config.changes_maximized);
+    }
+
+    #[test]
     fn an_empty_file_reads_as_the_defaults() {
         let config: Config = toml::from_str("").expect("an empty file is valid");
         assert_eq!(config, Config::default());
@@ -88,6 +108,7 @@ mod tests {
     fn a_setting_survives_a_round_trip_through_toml() {
         let config = Config {
             recap_on_pause: true,
+            ..Config::default()
         };
         let text = toml::to_string(&config).expect("the config serializes");
         let back: Config = toml::from_str(&text).expect("and reads back");
