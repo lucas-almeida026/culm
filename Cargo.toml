@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2024"
 description = "A terminal application that runs many Claude Code sessions in one project, as vertical tabs."
 license = "Unlicense"
-repository = "https://github.com/nullenbox/culm"
+repository = "https://github.com/lucas-almeida026/culm"
 readme = "README.md"
 
 [dependencies]
