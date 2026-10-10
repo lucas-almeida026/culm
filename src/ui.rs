@@ -525,7 +525,7 @@ const WARN_LONG: &str = "markers off, run: culm hooks install";
 const WARN_SHORT: &str = "markers off";
 
 /// Every binding culm reserves, and what each one does.
-const SHORTCUTS: [(&str, &str); 20] = [
+const SHORTCUTS: [(&str, &str); 21] = [
     ("Alt+0", "focus the shell at position 0"),
     ("Alt+1 to Alt+9", "focus an active session"),
     ("Alt+Shift+N", "create a session"),
@@ -539,6 +539,10 @@ const SHORTCUTS: [(&str, &str); 20] = [
     (
         "j k, Up Down, Enter",
         "in the sidebar: move, then show a session",
+    ),
+    (
+        "J K, Shift+Up Down",
+        "in the sidebar: reorder within its list",
     ),
     ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
     ("Alt+Shift+H", "this table"),

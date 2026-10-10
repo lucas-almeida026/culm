@@ -3736,3 +3736,216 @@ fn a_click_on_a_sidebar_row_puts_the_highlight_there() {
     assert_eq!(app.focus(), Focus::Entry(1));
     assert_eq!(app.sidebar_cursor(), Some(Focus::Entry(1)));
 }
+
+fn shift(code: KeyCode) -> KeyEvent {
+    key(code, KeyModifiers::SHIFT)
+}
+
+fn active_names(app: &App) -> Vec<String> {
+    app.entries()
+        .iter()
+        .filter(|e| e.is_active())
+        .map(|e| e.name().to_string())
+        .collect()
+}
+
+fn paused_names(app: &App) -> Vec<String> {
+    app.paused_matches()
+        .into_iter()
+        .map(|i| app.entries()[i].name().to_string())
+        .collect()
+}
+
+/// Three active sessions and three paused ones, the paused list reading
+/// `p3, p2, p1` because each pause lifts its session to the top.
+fn two_lists(f: &Fakes) -> App {
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    for name in ["a1", "a2", "a3", "p1", "p2", "p3"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("a session starts");
+    }
+    for name in ["p1", "p2", "p3"] {
+        focus_named(&mut app, name);
+        app.toggle_pause(&f.deps()).expect("the session pauses");
+    }
+    app
+}
+
+/// Gives the sidebar the keys with the highlight on one session.
+fn highlight(app: &mut App, f: &Fakes, name: &str) {
+    focus_named(app, name);
+    app.set_pane(Pane::Panel);
+    press(app, f, alt_shift('O'));
+}
+
+#[test]
+fn a_session_that_pauses_goes_to_the_top_of_the_paused_list() {
+    let f = Fakes::new();
+    let app = two_lists(&f);
+    assert_eq!(paused_names(&app), ["p3", "p2", "p1"]);
+}
+
+#[test]
+fn shift_up_moves_a_paused_session_up_its_list() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "p1");
+
+    press(&mut app, &f, shift(KeyCode::Up));
+    assert_eq!(paused_names(&app), ["p3", "p1", "p2"]);
+    press(&mut app, &f, key(KeyCode::Char('K'), KeyModifiers::SHIFT));
+    assert_eq!(
+        paused_names(&app),
+        ["p1", "p3", "p2"],
+        "K moves it as Shift+Up does"
+    );
+    assert_eq!(
+        app.sidebar_cursor().map(|row| match row {
+            Focus::Entry(i) => app.entries()[i].name().to_string(),
+            Focus::Shell => "shell".to_string(),
+        }),
+        Some("p1".to_string()),
+        "the highlight travels with the session"
+    );
+}
+
+#[test]
+fn the_first_paused_session_never_moves_into_the_active_list() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "p3");
+
+    press(&mut app, &f, shift(KeyCode::Up));
+
+    assert_eq!(paused_names(&app), ["p3", "p2", "p1"]);
+    assert_eq!(active_names(&app), ["a1", "a2", "a3"]);
+    assert_eq!(entry_named(&app, "p3").record.state, SessionState::Paused);
+}
+
+#[test]
+fn the_last_active_session_never_moves_past_the_active_count() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "a3");
+
+    press(&mut app, &f, key(KeyCode::Char('J'), KeyModifiers::SHIFT));
+
+    assert_eq!(active_names(&app), ["a1", "a2", "a3"]);
+    assert_eq!(paused_names(&app), ["p3", "p2", "p1"]);
+}
+
+#[test]
+fn the_first_active_session_never_moves_above_the_shell() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "a1");
+
+    press(&mut app, &f, shift(KeyCode::Up));
+
+    assert_eq!(active_names(&app), ["a1", "a2", "a3"]);
+}
+
+#[test]
+fn moving_an_active_session_changes_the_digit_that_reaches_it() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "a1");
+
+    press(&mut app, &f, shift(KeyCode::Down));
+    press(&mut app, &f, key(KeyCode::Char('2'), KeyModifiers::ALT));
+
+    assert_eq!(active_names(&app), ["a2", "a1", "a3"]);
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("a1"));
+}
+
+#[test]
+fn a_move_keeps_the_panel_on_the_session_it_showed() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    focus_named(&mut app, "a2");
+    press(&mut app, &f, alt_shift('O'));
+    press(&mut app, &f, key(KeyCode::Up, KeyModifiers::NONE));
+
+    press(&mut app, &f, shift(KeyCode::Down));
+
+    assert_eq!(active_names(&app), ["a2", "a1", "a3"], "a1 moved below a2");
+    assert_eq!(app.visible().map(culm::app::Entry::name), Some("a2"));
+}
+
+#[test]
+fn the_shell_row_does_not_move() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    app.focus_shell();
+    press(&mut app, &f, alt_shift('O'));
+
+    press(&mut app, &f, shift(KeyCode::Down));
+
+    assert_eq!(active_names(&app), ["a1", "a2", "a3"]);
+    assert_eq!(app.sidebar_cursor(), Some(Focus::Shell));
+}
+
+#[test]
+fn inside_a_searched_paused_list_a_move_swaps_with_the_next_match() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    for name in ["fix-a", "other", "fix-b"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("a session starts");
+        focus_named(&mut app, name);
+        app.toggle_pause(&f.deps()).expect("the session pauses");
+    }
+    assert_eq!(paused_names(&app), ["fix-b", "other", "fix-a"]);
+    press(&mut app, &f, alt_shift('F'));
+    type_text(&mut app, &f, "fix");
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+    highlight(&mut app, &f, "fix-a");
+
+    press(&mut app, &f, shift(KeyCode::Up));
+
+    assert_eq!(
+        paused_names(&app),
+        ["fix-a", "fix-b"],
+        "the two matches swapped"
+    );
+    press(&mut app, &f, key(KeyCode::Esc, KeyModifiers::NONE));
+    press(&mut app, &f, alt_shift('F'));
+    press(&mut app, &f, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+        paused_names(&app),
+        ["fix-a", "other", "fix-b"],
+        "the hidden session kept its place"
+    );
+}
+
+#[test]
+fn a_hand_order_is_saved_and_survives_a_reopen() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "p1");
+    press(&mut app, &f, shift(KeyCode::Up));
+    highlight(&mut app, &f, "a3");
+    press(&mut app, &f, shift(KeyCode::Up));
+    app.shutdown(&f.deps()).expect("the app closes and saves");
+
+    let saved = f.store.project("spm").expect("the project was saved");
+    let app = App::open(saved, &f.deps(), 20, 60);
+
+    assert_eq!(active_names(&app), ["a1", "a3", "a2"]);
+    assert_eq!(paused_names(&app), ["p3", "p1", "p2"]);
+}
+
+#[test]
+fn a_new_pause_lands_on_top_and_leaves_the_hand_order_below_it() {
+    let f = Fakes::new();
+    let mut app = two_lists(&f);
+    highlight(&mut app, &f, "p1");
+    press(&mut app, &f, shift(KeyCode::Up));
+    press(&mut app, &f, shift(KeyCode::Up));
+    assert_eq!(paused_names(&app), ["p1", "p3", "p2"]);
+
+    focus_named(&mut app, "a2");
+    app.toggle_pause(&f.deps()).expect("a2 pauses");
+
+    assert_eq!(paused_names(&app), ["a2", "p1", "p3", "p2"]);
+}

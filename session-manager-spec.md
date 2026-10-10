@@ -121,7 +121,7 @@ Run many Claude Code sessions at the same time, one per feature. Group the sessi
 48. Focus a row on a click. A click alone never starts a process.
 49. Pause a session with SIGTERM. An in-flight tool call is lost. Do not wait for an idle session.
 50. Move a session to the other half when the state of the session changes.
-51. Order the paused half by the time of the last interaction, newest first. Keep the active half in its own order, because a digit addresses it.
+51. Put a session that enters the paused half at the top of that half. Keep the order of each half otherwise, because the user arranges both halves by hand, as requirement 165 defines. Order the archive by the time of the last interaction, newest first.
 52. Record the time of the last interaction when a session is created, resumed, paused, and sent a keystroke. Write the record on the next tick, so that typing never costs a file write.
 
 ### The shell
@@ -285,6 +285,10 @@ One Claude Code process measured about 436 MB of resident memory on 2026-09-02. 
 162. Show the highlighted session in the panel on `Enter`, and give the keys to the panel. Give the keys to the panel on `Esc` with no change to the panel.
 163. Focus the search box on `/`. On any other letter, focus the search box and start the search with that letter.
 164. Give the keys to the sidebar while the search box is focused. Give them to the panel when the search ends with `Enter` or `Esc`.
+165. Move the highlighted session one row up or one row down its own list with `Shift+Up`, `Shift+Down`, `K`, and `J`, while the sidebar holds the keys. Move the highlight with the session. Leave the panel on the session it shows.
+166. Stop a move at the border of a list. The first active session does not move above the shell. The last active session does not move into the paused list. The first paused session does not move into the active list. A stopped move changes nothing.
+167. While the paused search holds a filter, swap a paused session with the next match on screen. Keep the sessions that the search hides in their places.
+168. Give the digits the new active order at once. Save the order on the next tick, so that the order survives a restart.
 
 ## Out of scope
 
@@ -318,6 +322,7 @@ Every question below was open in the first version of this document. Each row re
 | 16 | Confirming a session delete | Two buttons, with the cursor on no. `y` and `n` move the cursor, `Enter` answers, and a click answers. The typed name is dropped, because retyping a name is friction rather than safety when the default answer is already no. | 2026-09-07 |
 | 17 | Archive or pause | Both stop the process. A pause keeps the session in the sidebar and in the paused search, and takes a recap while `recap-on-pause` is on. An archive removes the session from both and never takes a recap. | 2026-10-10 |
 | 18 | Keys after a click on a sidebar row | The sidebar holds the keys, because the pointer is over the sidebar. The keys follow the pointer, so a move over the panel gives them back to the panel. | 2026-10-10 |
+| 19 | Order of the paused list | Hand order. A session that enters the paused list goes to the top, so an untouched list reads newest first. A sort by last use would undo a hand move at the next pause. | 2026-10-10 |
 
 ## Deferred
 

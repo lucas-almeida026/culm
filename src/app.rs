@@ -347,6 +347,7 @@ impl App {
         app.cols = cols;
         app.now = deps.clock.now_secs();
         let records = std::mem::take(&mut app.project.sessions);
+        let mut failed = Vec::new();
         for mut record in records {
             let mut entry = Entry {
                 live: None,
@@ -364,10 +365,14 @@ impl App {
                     Err(e) => {
                         app.status_text = format!("{}: {e}", record.name);
                         entry.record.state = SessionState::Paused;
+                        failed.push(record.id.clone());
                     }
                 }
             }
             app.entries.push(entry);
+        }
+        for id in &failed {
+            app.lift(id);
         }
         app.reorder();
         app.spawn_shell(deps);
@@ -622,6 +627,48 @@ impl App {
         }
     }
 
+    /// Swaps the highlighted session with its neighbor on screen, one row up or down.
+    ///
+    /// The neighbor must sit in the same list. The shell above the first active row
+    /// and the border between the active and the paused list both stop the move, so
+    /// a session never changes list this way. Inside a searched paused list the
+    /// neighbor is the next match on screen, and the sessions the search hides keep
+    /// their places.
+    fn move_highlighted(&mut self, down: bool) {
+        let rows = self.sidebar_rows();
+        let Some(Focus::Entry(from)) = self.sidebar_cursor() else {
+            return;
+        };
+        let Some(at) = rows.iter().position(|r| *r == Focus::Entry(from)) else {
+            return;
+        };
+        let neighbor = if down {
+            rows.get(at + 1)
+        } else {
+            at.checked_sub(1).and_then(|i| rows.get(i))
+        };
+        let Some(&Focus::Entry(to)) = neighbor else {
+            return;
+        };
+        let same_list = match (self.entries.get(from), self.entries.get(to)) {
+            (Some(a), Some(b)) => a.record.state == b.record.state,
+            _ => false,
+        };
+        if !same_list {
+            return;
+        }
+        let focused = self
+            .entries
+            .get(self.entry_focus)
+            .map(|e| e.record.id.clone());
+        self.entries.swap(from, to);
+        if let Some(id) = focused {
+            self.focus_id(&id);
+        }
+        // The order is saved on the next tick, as a keystroke's time is.
+        self.dirty = true;
+    }
+
     /// Feeds the sidebar. No key reaches a child while the sidebar holds the keys.
     fn sidebar_key(&mut self, key: &KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
@@ -631,7 +678,12 @@ impl App {
         {
             return;
         }
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            KeyCode::Up if shift => self.move_highlighted(false),
+            KeyCode::Down if shift => self.move_highlighted(true),
+            KeyCode::Char('K') => self.move_highlighted(false),
+            KeyCode::Char('J') => self.move_highlighted(true),
             KeyCode::Up | KeyCode::Char('k') => self.move_sidebar_cursor(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_sidebar_cursor(true),
             KeyCode::Enter => {
@@ -1554,6 +1606,13 @@ impl App {
             }
         };
         self.modal = None;
+        if self
+            .entries
+            .get(index)
+            .is_some_and(|e| e.record.is_paused())
+        {
+            self.lift(&record.id);
+        }
         self.reorder();
         self.focus_id(&record.id);
         self.shell_focused = false;
@@ -1630,6 +1689,7 @@ impl App {
             entry.rss = 0;
             self.set_status(format!("{} paused", record.name));
             self.start_recap(self.entry_focus, interacted, deps);
+            self.lift(&record.id);
         } else {
             if self.active_count() >= MAX_ACTIVE {
                 self.status_text =
@@ -1752,7 +1812,7 @@ impl App {
     /// Once a second: reap a child that ended on its own, and sample memory.
     pub fn on_tick(&mut self, probe: &dyn MemoryProbe, deps: &Deps<'_>) -> Result<()> {
         self.now = deps.clock.now_secs();
-        let mut reaped = false;
+        let mut reaped = Vec::new();
         for entry in &mut self.entries {
             let Some(session) = entry.live.as_mut() else {
                 continue;
@@ -1761,7 +1821,7 @@ impl App {
                 entry.live = None;
                 entry.record.state = SessionState::Paused;
                 entry.rss = 0;
-                reaped = true;
+                reaped.push(entry.record.id.clone());
                 continue;
             }
             entry.rss = session.pid().map_or(0, |pid| probe.rss_tree(pid));
@@ -1784,7 +1844,10 @@ impl App {
             self.shell_rss = 0;
             self.spawn_shell(deps);
         }
-        if reaped {
+        for id in &reaped {
+            self.lift(id);
+        }
+        if !reaped.is_empty() {
             let id = self
                 .entries
                 .get(self.entry_focus)
@@ -2088,8 +2151,11 @@ impl App {
         Ok(())
     }
 
-    /// Active sessions first, paused sessions next, archived sessions last, each part
-    /// in its own order.
+    /// Active sessions first, paused sessions next, archived sessions last.
+    ///
+    /// The active and the paused part keep their order, because the user arranges
+    /// both by hand. A session that enters the paused list is lifted to its top
+    /// first, by `lift`, so an untouched list still reads newest first.
     fn reorder(&mut self) {
         let focused = self
             .entries
@@ -2105,10 +2171,9 @@ impl App {
                 SessionState::Archived => archived.push(entry),
             }
         }
-        // The active part keeps its order, because a digit addresses it. The other
-        // two are ordered by last use, newest first, and the sort is stable, so two
-        // sessions of the same age keep the order they were added in.
-        paused.sort_by(|a, b| b.record.last_active.cmp(&a.record.last_active));
+        // The archive takes no hand order, so it is ordered by last use, newest
+        // first. The sort is stable, so two sessions of the same age keep the order
+        // they were added in.
         archived.sort_by(|a, b| b.record.last_active.cmp(&a.record.last_active));
         active.append(&mut paused);
         active.append(&mut archived);
@@ -2118,6 +2183,24 @@ impl App {
         }
         if self.entry_focus >= self.entries.len() {
             self.entry_focus = self.entries.len().saturating_sub(1);
+        }
+    }
+
+    /// Puts a session that just entered the paused list ahead of every other entry,
+    /// so the next `reorder` leaves it at the top of the paused list. The focus stays
+    /// on the session it was on.
+    fn lift(&mut self, id: &str) {
+        let Some(index) = self.entries.iter().position(|e| e.record.id == id) else {
+            return;
+        };
+        let focused = self
+            .entries
+            .get(self.entry_focus)
+            .map(|e| e.record.id.clone());
+        let entry = self.entries.remove(index);
+        self.entries.insert(0, entry);
+        if let Some(focused) = focused {
+            self.focus_id(&focused);
         }
     }
 
