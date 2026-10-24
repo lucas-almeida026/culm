@@ -194,6 +194,7 @@ pub fn run(
     store: &dyn Store,
     git: &dyn Git,
     namer: &dyn Namer,
+    hooks: &dyn crate::hooks::HookListener,
     exe: &Path,
     cwd: &Path,
 ) -> Result<Outcome> {
@@ -236,7 +237,7 @@ pub fn run(
             import_native_sessions,
         })) => project_new(store, namer, &path, name.as_deref(), import_native_sessions),
         Some(Command::Project(ProjectCmd::Alter(AlterCmd::Name { name, project }))) => {
-            project_rename(store, &name, project.as_deref(), cwd)
+            project_rename(store, hooks, &name, project.as_deref(), cwd)
         }
         Some(Command::Project(ProjectCmd::List)) => project_list(store),
         Some(Command::Project(ProjectCmd::Import { project })) => {
@@ -313,14 +314,25 @@ fn project_new(
 /// The state file is written under the new name before the registry points at it, so
 /// an interrupted rename leaves the old name working rather than leaving a registered
 /// project with no state.
+///
+/// A project open in a window is refused. The window writes its state under the
+/// name it opened with, so every change after the rename would land in a file no
+/// name points at.
 fn project_rename(
     store: &dyn Store,
+    hooks: &dyn crate::hooks::HookListener,
     new_name: &str,
     slug: Option<&str>,
     cwd: &Path,
 ) -> Result<Outcome> {
     let mut registry = store.load_registry()?;
     let entry = find_entry(&registry, slug, cwd)?.clone();
+    if hooks.is_open(&entry.slug) {
+        bail!(
+            "{} is open in culm. close its tab, then rename.",
+            entry.slug
+        );
+    }
     let new_slug = project_slug(new_name)?;
     if new_slug == entry.slug {
         println!("project {} already has that name", entry.slug);
@@ -339,7 +351,6 @@ fn project_rename(
     workspaces.rename_project(&entry.slug, &new_slug);
     store.save_workspaces(&workspaces)?;
     println!("project {} is now {new_slug}", entry.slug);
-    println!("an interface already open on it keeps the old name until it closes.");
     Ok(Outcome::Done)
 }
 

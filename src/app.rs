@@ -55,10 +55,43 @@ const SPINNER_EVERY: u64 = 20;
 const RECAP_LIMIT_SECS: u64 = 45;
 
 /// The switches the settings form shows, one per row.
-pub const SETTINGS_ROWS: usize = 2;
+pub const SETTINGS_ROWS: usize = 3;
 
 /// How long the report of a forced quit stays on the bar, in seconds.
 const FORCED_QUIT_NOTICE_SECS: u64 = 5;
+
+/// What the status bar shows after culm kept `Ctrl+z` from a session.
+pub const CTRL_Z_BLOCKED: &str =
+    "ctrl+z would suspend claude, so culm kept it. culm config set block-ctrl-z false sends it.";
+
+/// How long that notice stays, in seconds.
+const CTRL_Z_NOTICE_SECS: u64 = 5;
+
+/// True for `Ctrl+z`, with or without shift.
+fn is_ctrl_z(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(
+            key.code,
+            ratatui::crossterm::event::KeyCode::Char('z' | 'Z')
+        )
+}
+
+/// True for `Ctrl+v` with no other modifier.
+fn is_ctrl_v(key: &KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::CONTROL
+        && key.code == ratatui::crossterm::event::KeyCode::Char('v')
+}
+
+/// What the status bar shows when `Alt+Shift+Z` finds no paste to take back.
+pub const UNDO_NO_PASTE: &str = "the last edit is not a paste, so nothing was undone.";
+/// What it shows when `Alt+Shift+Z` reaches the shell.
+pub const UNDO_NO_SHELL: &str = "alt+shift+z undoes a paste in a claude code session only.";
+/// How long either notice stays, in seconds.
+const UNDO_NOTICE_SECS: u64 = 5;
+
+/// What the status bar shows while the last session to start has no wanted microphone.
+pub const NO_MIC: &str = "no microphone matched. voice dictation uses the system default.";
 
 /// The side effects the application needs. Passed at the call, never stored, so a
 /// test hands over fakes.
@@ -69,6 +102,7 @@ pub struct Deps<'a> {
     pub clock: &'a dyn Clock,
     pub recapper: &'a dyn Recapper,
     pub hooks: &'a dyn crate::hooks::HookListener,
+    pub mic: &'a dyn crate::mic::Microphones,
 }
 
 impl std::fmt::Debug for Deps<'_> {
@@ -158,6 +192,8 @@ pub struct ConfirmDelete {
     pub index: usize,
     pub name: String,
     pub answer: Answer,
+    /// The archive list the question came from. It returns after the answer.
+    pub archive: Option<ArchiveList>,
 }
 
 impl ConfirmDelete {
@@ -290,6 +326,10 @@ pub struct App {
     /// Unix seconds after which the status message stops showing. A message with no
     /// deadline stays until something replaces it.
     status_until: Option<u64>,
+    /// The last session to start found no wanted microphone.
+    mic_missing: bool,
+    /// The input of each Claude Code session, by id, for the undo of a paste.
+    pastes: std::collections::HashMap<String, crate::paste::PasteTrack>,
     /// The last copy. A middle click pastes it, and it survives a focus change so a
     /// copy in one session pastes into another.
     clipboard: String,
@@ -348,6 +388,8 @@ impl App {
             config: Config::default(),
             recap_work: None,
             status_until: None,
+            mic_missing: false,
+            pastes: std::collections::HashMap::new(),
             clipboard: String::new(),
             copied: None,
             filter: String::new(),
@@ -434,8 +476,22 @@ impl App {
         }
     }
 
-    fn start(&self, record: &SessionRecord, deps: &Deps<'_>) -> Result<Session> {
-        Session::spawn(deps.spawner, &self.spec_for(record))
+    /// Starts one session on the wanted microphone. The sound server is asked at each
+    /// start, so a microphone plugged in later reaches the next session to start.
+    fn start(&mut self, record: &SessionRecord, deps: &Deps<'_>) -> Result<Session> {
+        // A new process starts with an empty prompt, so no paste is left to undo.
+        self.pastes.remove(&record.id);
+        let mut spec = self.spec_for(record);
+        let sources = deps.mic.sources().unwrap_or_default();
+        self.mic_missing = match crate::mic::pick(&sources) {
+            Some(name) => {
+                spec.env
+                    .push((crate::mic::PULSE_SOURCE.into(), name.into()));
+                false
+            }
+            None => true,
+        };
+        Session::spawn(deps.spawner, &spec)
     }
 
     /// The command line for one session. A session that ran before resumes its
@@ -729,16 +785,13 @@ impl App {
                     Some(Focus::Entry(index)) => self.set_focus(index),
                     None => {}
                 }
+                self.reveal_chosen();
                 self.set_pane(Pane::Panel);
             }
             KeyCode::Esc => self.set_pane(Pane::Panel),
+            // Only a deliberate key starts a search. A letter typed while the user
+            // believes the session holds the keys would otherwise land in the box.
             KeyCode::Char('/') => self.filter_focused = true,
-            // Any other letter starts a search with itself, so finding a paused
-            // session by name takes no extra key.
-            KeyCode::Char(c) => {
-                self.filter_focused = true;
-                self.filter.push(c);
-            }
             _ => {}
         }
     }
@@ -821,11 +874,18 @@ impl App {
 
     #[must_use]
     pub fn status(&self) -> &str {
-        match self.status_until {
+        let text = match self.status_until {
             // A timed message retires on its own, so a report of the last run never
             // sits on the bar for the whole session.
             Some(until) if self.now > until => "",
             _ => &self.status_text,
+        };
+        // The warning waits under every other message, because the message that
+        // follows a start would hide it at once.
+        if text.is_empty() && self.mic_missing {
+            NO_MIC
+        } else {
+            text
         }
     }
 
@@ -976,6 +1036,7 @@ impl App {
             Some(HostAction::NerdMode) => self.nerd_mode = !self.nerd_mode,
             Some(HostAction::FocusShell) => {
                 self.focus_shell();
+                self.reveal_chosen();
                 self.set_pane(Pane::Panel);
             }
             Some(HostAction::TogglePane) => {
@@ -992,6 +1053,7 @@ impl App {
                 self.poll_git(deps);
             }
             Some(HostAction::DeleteSession) => self.open_delete(),
+            Some(HostAction::UndoPaste) => self.undo_paste()?,
             Some(HostAction::RenameSession) => self.open_rename(),
             Some(HostAction::ShowHelp) => self.modal = Some(Modal::Help),
             Some(HostAction::ShowSettings) => self.modal = Some(Modal::Settings),
@@ -1022,12 +1084,38 @@ impl App {
                     self.git_key(key, deps);
                     return Ok(());
                 }
+                // A full-screen program pages its own text. Anything else keeps
+                // its history in culm's scrollback, so culm pages that.
+                if crate::keys::is_plain_page_key(key)
+                    && self
+                        .focused_session()
+                        .is_some_and(|s| !s.alternate_screen())
+                {
+                    let half = i32::from(self.rows / 2);
+                    let up = key.code == ratatui::crossterm::event::KeyCode::PageUp;
+                    self.scroll_focus(if up { half } else { -half });
+                    return Ok(());
+                }
+                // The shell keeps `Ctrl+z`, because its job control brings a
+                // suspended job back.
+                if self.config.block_ctrl_z && is_ctrl_z(key) && !self.shell_focused {
+                    self.set_status_for(CTRL_Z_BLOCKED, CTRL_Z_NOTICE_SECS);
+                    return Ok(());
+                }
+                if crate::keys::is_ctrl_enter(key) && !self.shell_focused {
+                    return self.send_key_to_focus(crate::keys::CTRL_ENTER, deps);
+                }
                 let cursor = self
                     .focused_session()
                     .map(Session::cursor_keys)
                     .unwrap_or_default();
                 if let Some(bytes) = crate::keys::encode(key, cursor) {
-                    self.send_to_focus(&bytes)?;
+                    // Claude Code fills `Ctrl+v` from the clipboard, so to the undo
+                    // it is a paste like any other.
+                    if is_ctrl_v(key) && !self.shell_focused {
+                        return self.paste_to_focus(None, bytes, deps);
+                    }
+                    self.send_key_to_focus(&bytes, deps)?;
                 }
             }
         }
@@ -1035,7 +1123,7 @@ impl App {
     }
 
     /// Forwards a paste to the visible session as one bracketed block.
-    pub fn on_paste(&mut self, text: &str) -> Result<()> {
+    pub fn on_paste(&mut self, text: &str, deps: &Deps<'_>) -> Result<()> {
         match self.modal.as_mut() {
             Some(Modal::NewSession(form)) => {
                 if form.field == Field::Name {
@@ -1066,7 +1154,84 @@ impl App {
             return Ok(());
         }
         let bytes = crate::keys::encode_paste(text);
-        self.send_to_focus(&bytes)
+        if self.shell_focused {
+            return self.send_to_focus(&bytes);
+        }
+        self.paste_to_focus(Some(text), bytes, deps)
+    }
+
+    /// Sends a key to the visible session. A paste still held for a Claude Code
+    /// session goes first, so the session reads the input in the order it was given.
+    fn send_key_to_focus(&mut self, bytes: &[u8], deps: &Deps<'_>) -> Result<()> {
+        if let Some(id) = self.visible().map(|e| e.record.id.clone()) {
+            let now = deps.clock.now_millis();
+            let held = self.pastes.entry(id).or_default().key(now);
+            for paste in held {
+                self.send_to_focus(&paste)?;
+            }
+        }
+        self.send_to_focus(bytes)
+    }
+
+    /// Sends a paste to the visible Claude Code session, or holds it until the gap
+    /// after the last input has passed.
+    fn paste_to_focus(
+        &mut self,
+        text: Option<&str>,
+        bytes: Vec<u8>,
+        deps: &Deps<'_>,
+    ) -> Result<()> {
+        let Some(id) = self.visible().map(|e| e.record.id.clone()) else {
+            return Ok(());
+        };
+        let now = deps.clock.now_millis();
+        match self.pastes.entry(id).or_default().paste(text, bytes, now) {
+            Some(bytes) => self.send_to_focus(&bytes),
+            None => Ok(()),
+        }
+    }
+
+    /// Sends the held pastes whose gap has passed. The event loop calls this every
+    /// pass, for every tab, so a paste reaches its session after a switch as well.
+    pub fn flush_pastes(&mut self, deps: &Deps<'_>) {
+        let now = deps.clock.now_millis();
+        for entry in &mut self.entries {
+            let Some(track) = self.pastes.get_mut(&entry.record.id) else {
+                continue;
+            };
+            if !track.holds() {
+                continue;
+            }
+            for paste in track.due(now) {
+                if let Some(session) = entry.live.as_mut() {
+                    session.scroll_to_bottom();
+                    let _ = session.send(&paste);
+                }
+            }
+        }
+    }
+
+    /// Takes back the last paste in the visible Claude Code session.
+    fn undo_paste(&mut self) -> Result<()> {
+        if self.shell_focused {
+            self.set_status_for(UNDO_NO_SHELL, UNDO_NOTICE_SECS);
+            return Ok(());
+        }
+        let Some(id) = self.visible().map(|e| e.record.id.clone()) else {
+            return Ok(());
+        };
+        match self
+            .pastes
+            .get_mut(&id)
+            .and_then(crate::paste::PasteTrack::undo)
+        {
+            Some(bytes) if bytes.is_empty() => Ok(()),
+            Some(bytes) => self.send_to_focus(&bytes),
+            None => {
+                self.set_status_for(UNDO_NO_PASTE, UNDO_NOTICE_SECS);
+                Ok(())
+            }
+        }
     }
 
     /// Forwards bytes to the visible session, and clears a permission marker.
@@ -1259,6 +1424,29 @@ impl App {
             index,
             name,
             answer: Answer::No,
+            archive: None,
+        }));
+    }
+
+    /// Asks to delete the highlighted archived session. An archived session has no
+    /// process, so it needs no pause first, and no restore either.
+    fn open_archived_delete(&mut self) {
+        let Some(Modal::Archive(list)) = self.modal.take() else {
+            return;
+        };
+        let Some((index, name)) = self
+            .archived_matches(&list.filter)
+            .get(list.cursor)
+            .and_then(|&i| Some((i, self.entries.get(i)?.record.name.clone())))
+        else {
+            self.modal = Some(Modal::Archive(list));
+            return;
+        };
+        self.modal = Some(Modal::ConfirmDelete(ConfirmDelete {
+            index,
+            name,
+            answer: Answer::No,
+            archive: Some(list),
         }));
     }
 
@@ -1279,6 +1467,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(&index) = self.paused_matches().first() {
                     self.set_focus(index);
+                    self.reveal_chosen();
                 }
                 self.set_pane(Pane::Panel);
             }
@@ -1331,6 +1520,11 @@ impl App {
         let record = entry.record.clone();
         deps.store.remove_transcript(&record.cwd, &record.id)?;
         self.entries.remove(index);
+        // The entries after the deleted one move up one, so a focus past it moves
+        // with the session it names.
+        if index < self.entry_focus {
+            self.entry_focus -= 1;
+        }
         if self.entry_focus >= self.entries.len() {
             self.entry_focus = self.entries.len().saturating_sub(1);
         }
@@ -1347,7 +1541,7 @@ impl App {
         match self.modal.as_mut() {
             Some(Modal::ConfirmDelete(confirm)) => {
                 match key.code {
-                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Esc => self.modal = confirm.archive.take().map(Modal::Archive),
                     // A letter moves the cursor onto a button. It never answers on its
                     // own, so deleting still takes two keys.
                     KeyCode::Char('y' | 'Y') => confirm.answer = Answer::Yes,
@@ -1360,9 +1554,10 @@ impl App {
                     }
                     KeyCode::Enter => {
                         let confirm = confirm.clone();
-                        self.modal = None;
+                        self.modal = confirm.archive.clone().map(Modal::Archive);
                         if confirm.confirmed() {
                             self.delete_session(confirm.index, deps)?;
+                            self.clamp_archive_cursor();
                         }
                     }
                     _ => {}
@@ -1383,7 +1578,8 @@ impl App {
                 if key.code == KeyCode::Char(' ') {
                     match self.settings_cursor {
                         0 => self.config.recap_on_pause = !self.config.recap_on_pause,
-                        _ => self.config.changes_maximized = !self.config.changes_maximized,
+                        1 => self.config.changes_maximized = !self.config.changes_maximized,
+                        _ => self.config.block_ctrl_z = !self.config.block_ctrl_z,
                     }
                     // Settings are global, so they are written at once rather than
                     // waiting on a project to be saved.
@@ -1527,6 +1723,7 @@ impl App {
                 // A session made from the shell is still the one the user wants
                 // to see, so the shell lets go of the panel.
                 self.shell_focused = false;
+                self.reveal_chosen();
                 self.set_pane(Pane::Panel);
                 self.clear_status();
                 self.save(deps)?;
@@ -1560,6 +1757,10 @@ impl App {
                 return Ok(());
             }
             Some(HostAction::ToggleArchive) => return self.restore_highlighted(deps),
+            Some(HostAction::DeleteSession) => {
+                self.open_archived_delete();
+                return Ok(());
+            }
             _ => {}
         }
         let Some(Modal::Archive(list)) = self.modal.as_mut() else {
@@ -2158,8 +2359,14 @@ impl App {
                     return;
                 }
                 match hit.rows.iter().find(|(r, _)| *r == row) {
-                    Some((_, Focus::Shell)) => self.focus_shell(),
-                    Some((_, Focus::Entry(index))) => self.set_focus(*index),
+                    Some((_, Focus::Shell)) => {
+                        self.focus_shell();
+                        self.reveal_chosen();
+                    }
+                    Some((_, Focus::Entry(index))) => {
+                        self.set_focus(*index);
+                        self.reveal_chosen();
+                    }
                     None => {}
                 }
                 // The highlight lands on the row that was clicked.
@@ -2218,7 +2425,7 @@ impl App {
                 if !text.is_empty() {
                     // A middle click pastes exactly as a terminal paste does, so the
                     // child receives one bracketed block rather than many keystrokes.
-                    let _ = self.on_paste(&text);
+                    let _ = self.on_paste(&text, deps);
                 }
             }
             MouseEventKind::ScrollUp if hit.panel.contains(at) => {
@@ -2303,6 +2510,19 @@ impl App {
     #[must_use]
     pub fn git(&self) -> &GitView {
         &self.git
+    }
+
+    /// Uncovers the session the user just chose. A maximized changes panel hides
+    /// every session, so it closes. A panel beside the session stays, and follows
+    /// the new choice on the next poll.
+    fn reveal_chosen(&mut self) {
+        if self.git_split() != GitSplit::Full {
+            return;
+        }
+        self.git.close();
+        if self.pane == Pane::Git {
+            self.pane = Pane::Panel;
+        }
     }
 
     /// Where the changes panel sits.

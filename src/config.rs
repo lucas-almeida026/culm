@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Everything culm reads from `config.toml`.
 ///
 /// Key bindings belong here too one day. Only the settings below are read so far.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Ask a paused session what it was doing, and keep the answer.
@@ -18,11 +18,27 @@ pub struct Config {
     pub recap_on_pause: bool,
     /// Open the changes panel over the whole session instead of beside it.
     pub changes_maximized: bool,
+    /// Keep `Ctrl+z` from a Claude Code session.
+    ///
+    /// On by default. Claude Code suspends itself on `Ctrl+z`, and inside culm no
+    /// shell exists to bring it back with `fg`, so the session freezes.
+    pub block_ctrl_z: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            recap_on_pause: false,
+            changes_maximized: false,
+            block_ctrl_z: true,
+        }
+    }
 }
 
 /// The name a setting carries on the command line and in the file.
 pub const RECAP_ON_PAUSE: &str = "recap-on-pause";
 pub const CHANGES_MAXIMIZED: &str = "changes-maximized";
+pub const BLOCK_CTRL_Z: &str = "block-ctrl-z";
 
 impl Config {
     /// Every setting and its current value, in the order the listing shows them.
@@ -31,6 +47,7 @@ impl Config {
         vec![
             (RECAP_ON_PAUSE, self.recap_on_pause.to_string()),
             (CHANGES_MAXIMIZED, self.changes_maximized.to_string()),
+            (BLOCK_CTRL_Z, self.block_ctrl_z.to_string()),
         ]
     }
 
@@ -46,6 +63,10 @@ impl Config {
             }
             CHANGES_MAXIMIZED => {
                 self.changes_maximized = parse_bool(value).ok_or(SetError::Value)?;
+                Ok(())
+            }
+            BLOCK_CTRL_Z => {
+                self.block_ctrl_z = parse_bool(value).ok_or(SetError::Value)?;
                 Ok(())
             }
             _ => Err(SetError::Key),
@@ -90,6 +111,14 @@ mod tests {
             .set(CHANGES_MAXIMIZED, "on")
             .expect("a known setting");
         assert!(config.changes_maximized);
+    }
+
+    #[test]
+    fn ctrl_z_is_blocked_until_asked_otherwise() {
+        let mut config: Config = toml::from_str("recap_on_pause = true\n").expect("valid");
+        assert!(config.block_ctrl_z, "a file without the key blocks the key");
+        config.set(BLOCK_CTRL_Z, "false").expect("a known setting");
+        assert!(!config.block_ctrl_z);
     }
 
     #[test]

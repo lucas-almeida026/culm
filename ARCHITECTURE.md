@@ -41,6 +41,7 @@ The process holds one hierarchy:
 | `src/config.rs` | The settings that apply to every project. |
 | `src/stats.rs` | Memory sampling from `/proc`, behind `MemoryProbe`. |
 | `src/clock.rs` | The time, behind `Clock`. |
+| `src/mic.rs` | The microphone a session records from, picked from `pactl` output, behind `Microphones`. |
 | `src/git.rs` | Worktree commands and the read-only git reads of the changes panel, behind `Git`. |
 | `src/diff.rs` | The changes panel's data: git's output parsed, two versions of a file laid side by side, and syntax colors. Pure functions, except the color grammars it loads. |
 | `src/gitview.rs` | The state of the changes panel: repository tabs, lists, picks, the diff on screen, keys, and clicks. |
@@ -63,6 +64,8 @@ Input comes first, so a keystroke never waits behind a frame. Every wait in culm
 ## Sessions and their children
 
 Each session is a real `claude` process on its own pseudoterminal, opened with `portable-pty`. The environment of every child carries `TERM=xterm-256color` and `COLORTERM=truecolor`.
+
+Each session start also asks the sound server for its sources through `Microphones`, and sets `PULSE_SOURCE` to the wanted one. Claude Code's voice dictation records from that source. `src/mic.rs` fixes the choice for the maintainer's machine: a source whose name or description holds `NoiseTorch`, then one that holds `Family 17h/19h`. A monitor source never matches. With no match, or with no `pactl`, the session starts on the system default, and the status bar shows a warning under every other message until a later start finds a source. A running session keeps the source it started with. Evidence: `a_session_records_from_the_wanted_microphone`, `a_session_with_no_wanted_microphone_starts_on_the_default_and_says_so`, and `a_resume_picks_a_microphone_that_appeared_after_the_first_start` in `tests/session_lifecycle.rs`, and the tests in `src/mic.rs`. The shell gets no `PULSE_SOURCE`.
 
 A drain thread per session reads the pseudoterminal and feeds a `vt100` parser with 2000 lines of scrollback. The thread runs for every session, on screen or not. A pseudoterminal that nobody reads fills its buffer, and the child then blocks on its next write. The symptom looks like a hung session in the background. A frame copies only the focused session's screen into the ratatui buffer, so a tab or session switch costs nothing.
 
@@ -105,11 +108,16 @@ Each project starts `$SHELL` at its root, at the top of its sidebar. The shell u
 `keys::host_action` decides which keys culm keeps. Every other key goes to `keys::encode` and then to the focused child.
 
 - `Alt` is the only leader. culm keeps `Alt` plus a digit from 1 to 8, `Alt+0`, a set of `Alt+Shift` letters, `Ctrl+q`, and `Shift+PageUp` and `Shift+PageDown`.
+- Plain `PageUp` and `PageDown` scroll culm's scrollback of the panel, as `Shift+PageUp` and `Shift+PageDown` do. A child on the alternate screen, such as vim, less, or Claude Code's fullscreen renderer, gets the key instead, because such a child keeps no scrollback in culm and pages its own text. Evidence: `plain_page_up_scrolls_the_history_of_a_session_on_the_main_screen` and `a_full_screen_program_pages_its_own_text` in `tests/session_lifecycle.rs`.
 - An `Alt+Shift` letter arrives as an uppercase letter on the legacy path, and as a lowercase letter with the shift modifier on the kitty path. `host_action` accepts both forms.
 - culm asks the terminal for the kitty keyboard protocol with `DISAMBIGUATE_ESCAPE_CODES`. A terminal that refuses runs the legacy path. The bottom bar names the mode.
 - `encode` follows the cursor key mode of the child. When the child sets DECCKM, as zsh does through terminfo `smkx`, arrows, `Home`, and `End` go out as `ESC O x`. Otherwise they go out as `ESC [ x`.
 - `Shift+Enter` goes out as `ESC CR`, the sequence Claude Code binds to a new line in `/terminal-setup`.
 - `Ctrl+Backspace` goes out as `ESC DEL`, which zsh, bash, and Claude Code read as a word delete.
+- `Ctrl+Enter` goes out to a Claude Code session as `CSI 13;5u`. Claude Code 2.1.310 parses that form and binds `ctrl+enter` to `chat:sendNow`, checked on 2026-10-24 in the strings of the binary. The shell gets `CR`, as a plain terminal sends. On the legacy keyboard path the terminal reports `Ctrl+Enter` as `Enter`, so the key arrives as `Enter`.
+- With `block-ctrl-z` on, the default, `Ctrl+z` reaches no Claude Code session. Claude Code suspends itself on the key, and no shell above it in culm runs `fg`. The shell gets the key.
+- `Alt+Shift+Z` takes back the last paste in a Claude Code session. `src/paste.rs` holds the rules. culm never sees the prompt, so culm sends Claude Code's own undo, `Ctrl+_`. Claude Code merges edits less than about one second apart into one undo step, so culm holds a paste until 1000 ms (`PASTE_GAP_MS`) after the last input that session received. A key during the wait sends the held paste first. The same text pasted twice expands a collapsed paste, so its undo sends `Ctrl+_` twice. `Ctrl+v` counts as a paste, because Claude Code fills it from the clipboard. A paste in the shell never waits.
+- While the sidebar holds the keys, only `/` starts the paused search. A letter does nothing, so a letter typed in the wrong pane never lands in the search box.
 
 ### Panes
 
@@ -222,6 +230,7 @@ These hold today. A change that breaks one of them breaks culm in a way no test 
 - One user runs culm on one machine. culm takes no file lock on the state files. Two windows on different projects are safe, because each project has its own state file.
 - A socket that answers a connection belongs to a live culm. A socket file that refuses is left over from a crash, and culm replaces it.
 - `culm hooks install` records the path of the binary. Moving the binary breaks every hook until `culm hooks install` runs again.
+- `pactl` 16 or later exists, because `-f json` needs it. Without `pactl`, sessions start on the system default microphone.
 - `/proc` exists, so memory sampling works. Memory sampling is the only Linux-only code path besides the release packages.
 
 ### About identifiers
@@ -244,6 +253,7 @@ Every side effect enters through a trait, and each trait has a fake in `src/test
 | `HookListener` | `SocketHookListener` | `FakeHookListener` hands the test a sender per project. |
 | `MemoryProbe` | `ProcMemoryProbe` | `FakeMemoryProbe` returns set values. |
 | `Namer` | `ClaudeNamer` | `FakeNamer` answers by prompt text. |
+| `Microphones` | `PactlMicrophones` | `FakeMicrophones` holds one wanted source until a test sets others, or fails. |
 
 `tests/session_lifecycle.rs` drives one project through `App`. `tests/browser.rs` drives the window through `Browser`, including the command line. `tests/import.rs` covers the import of existing transcripts. The tests start no process and write only inside a temporary directory.
 

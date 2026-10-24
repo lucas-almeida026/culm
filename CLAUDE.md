@@ -101,7 +101,7 @@ A commit that jumps to step 3 without a measurement is a defect.
 
 Every side effect enters through a trait. The tests are fast and deterministic because of this rule.
 
-- `Deps` in `src/app.rs` carries every side effect a project needs: `PtySpawner`, `Git`, `Store`, `Clock`, `Recapper`, and `HookListener`. Pass `Deps` at the call. Never store it.
+- `Deps` in `src/app.rs` carries every side effect a project needs: `PtySpawner`, `Git`, `Store`, `Clock`, `Recapper`, `HookListener`, and `Microphones`. Pass `Deps` at the call. Never store it.
 - Each trait has a real implementation and a fake in `src/testing.rs`.
 - No global state, no singleton, no lazily initialized handle to the operating system.
 - Core logic never calls `std::process`, `std::fs`, or `std::time::SystemTime` directly. When a new side effect appears, add a trait for it, add a fake, and inject both.

@@ -42,7 +42,15 @@ fn main() -> Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("culm"));
     let cwd = std::env::current_dir()?;
 
-    match cli::run(parsed, &store, &SystemGit, &ClaudeNamer, &exe, &cwd)? {
+    match cli::run(
+        parsed,
+        &store,
+        &SystemGit,
+        &ClaudeNamer,
+        &hooks::SocketHookListener,
+        &exe,
+        &cwd,
+    )? {
         Outcome::Done => Ok(()),
         Outcome::Open(plan) => open(*plan, &store),
     }
@@ -102,6 +110,7 @@ fn run(
     let clock = SystemClock;
     let recapper = ClaudeRecapper;
     let listener = hooks::SocketHookListener;
+    let mic = culm::mic::PactlMicrophones;
     let deps = Deps {
         spawner: &spawner,
         git: &git,
@@ -109,6 +118,7 @@ fn run(
         clock: &clock,
         recapper: &recapper,
         hooks: &listener,
+        mic: &mic,
     };
 
     // The first sessions start before the first draw, so every panel is sized from
@@ -130,7 +140,7 @@ fn run(
         if event::poll(Duration::from_millis(4))? {
             match event::read()? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => browser.on_key(&k, &deps)?,
-                Event::Paste(text) => browser.on_paste(&text)?,
+                Event::Paste(text) => browser.on_paste(&text, &deps)?,
                 Event::Mouse(m) => {
                     browser.on_mouse(m.kind, m.column, m.row, m.modifiers, &hit, &deps);
                     // Only the loop owns the output stream, so the copy is written

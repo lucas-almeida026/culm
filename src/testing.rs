@@ -64,6 +64,10 @@ impl crate::hooks::HookListener for FakeHookListener {
         lock(&self.senders).remove(slug);
         lock(&self.released).push(slug.to_string());
     }
+
+    fn is_open(&self, slug: &str) -> bool {
+        lock(&self.senders).contains_key(slug) || lock(&self.elsewhere).iter().any(|s| s == slug)
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -812,25 +816,35 @@ impl crate::namer::Namer for FakeNamer {
 /// A clock a test moves by hand, so an ordering rule never waits for real time.
 #[derive(Debug, Default, Clone)]
 pub struct FakeClock {
-    secs: Arc<AtomicU64>,
+    millis: Arc<AtomicU64>,
 }
 
 impl FakeClock {
     #[must_use]
     pub fn new(secs: u64) -> Self {
         Self {
-            secs: Arc::new(AtomicU64::new(secs)),
+            millis: Arc::new(AtomicU64::new(secs.saturating_mul(1000))),
         }
     }
 
     pub fn set(&self, secs: u64) {
-        self.secs.store(secs, Ordering::Relaxed);
+        self.millis
+            .store(secs.saturating_mul(1000), Ordering::Relaxed);
+    }
+
+    /// Moves the clock forward by a number of milliseconds.
+    pub fn advance_millis(&self, millis: u64) {
+        self.millis.fetch_add(millis, Ordering::Relaxed);
     }
 }
 
 impl crate::clock::Clock for FakeClock {
     fn now_secs(&self) -> u64 {
-        self.secs.load(Ordering::Relaxed)
+        self.millis.load(Ordering::Relaxed) / 1000
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.millis.load(Ordering::Relaxed)
     }
 }
 
@@ -861,5 +875,52 @@ impl crate::stats::MemoryProbe for FakeMemoryProbe {
             .get(&pid)
             .copied()
             .unwrap_or(self.fallback)
+    }
+}
+
+/// The sound server's sources, set by the test. Holds one wanted microphone until a
+/// test changes it, so a test about something else sees no warning.
+#[derive(Debug, Clone)]
+pub struct FakeMicrophones {
+    sources: Arc<Mutex<Result<Vec<crate::mic::AudioSource>, String>>>,
+}
+
+/// The name the default fake microphone carries.
+pub const FAKE_MIC: &str = "NoiseTorch Microphone for a fake device";
+
+impl Default for FakeMicrophones {
+    fn default() -> Self {
+        Self {
+            sources: Arc::new(Mutex::new(Ok(vec![crate::mic::AudioSource {
+                name: FAKE_MIC.into(),
+                description: None,
+                monitor_source: None,
+            }]))),
+        }
+    }
+}
+
+impl FakeMicrophones {
+    /// Replaces the sources by bare names, none of them a monitor.
+    pub fn set(&self, names: &[&str]) {
+        *lock(&self.sources) = Ok(names
+            .iter()
+            .map(|n| crate::mic::AudioSource {
+                name: (*n).into(),
+                description: None,
+                monitor_source: None,
+            })
+            .collect());
+    }
+
+    /// Makes the sound server unreachable, as when `pactl` is missing.
+    pub fn fail(&self) {
+        *lock(&self.sources) = Err("pactl: not found".into());
+    }
+}
+
+impl crate::mic::Microphones for FakeMicrophones {
+    fn sources(&self) -> Result<Vec<crate::mic::AudioSource>> {
+        lock(&self.sources).clone().map_err(|e| anyhow!(e))
     }
 }

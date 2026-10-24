@@ -156,6 +156,17 @@ impl Session {
         })
     }
 
+    /// True while the child draws on the alternate screen, as a full-screen program
+    /// such as vim, less, or Claude Code's fullscreen renderer does.
+    #[must_use]
+    pub fn alternate_screen(&self) -> bool {
+        let parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        parser.screen().alternate_screen()
+    }
+
     /// How the child asked the arrows, `Home` and `End` to be sent.
     #[must_use]
     pub fn cursor_keys(&self) -> crate::keys::CursorKeys {

@@ -34,6 +34,8 @@ pub enum HostAction {
     MoveTabRight,
     /// Opens the changes panel, or closes it.
     ToggleGit,
+    /// Takes back the last paste in a Claude Code session.
+    UndoPaste,
 }
 
 /// Returns the host action for a key, or `None` when the key belongs to the session.
@@ -47,8 +49,9 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         return Some(HostAction::Quit);
     }
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-    // Scrollback keeps the binding every terminal already uses for it. Plain
-    // `PageUp` and `PageDown` still belong to the child.
+    // Scrollback keeps the binding every terminal already uses for it. The panel
+    // decides about plain `PageUp` and `PageDown`, because the answer depends on
+    // the screen the child draws on.
     if shift {
         match k.code {
             KeyCode::PageUp => return Some(HostAction::ScrollUp),
@@ -92,6 +95,8 @@ pub fn host_action(k: &KeyEvent) -> Option<HostAction> {
         KeyCode::Char('o') if shift => Some(HostAction::TogglePane),
         KeyCode::Char('G') => Some(HostAction::ToggleGit),
         KeyCode::Char('g') if shift => Some(HostAction::ToggleGit),
+        KeyCode::Char('Z') => Some(HostAction::UndoPaste),
+        KeyCode::Char('z') if shift => Some(HostAction::UndoPaste),
         _ => None,
     }
 }
@@ -157,6 +162,23 @@ pub fn encode(k: &KeyEvent, cursor: CursorKeys) -> Option<Vec<u8>> {
         return Some(v);
     }
     Some(base)
+}
+
+/// `Ctrl+Enter` in the `CSI u` form. A legacy terminal collapses the key onto
+/// `Enter`, so a Claude Code session gets the form Claude Code's input parser reads:
+/// version 2.1.310 binds `ctrl+enter` to `chat:sendNow`, checked on 2026-10-24.
+pub const CTRL_ENTER: &[u8] = b"\x1b[13;5u";
+
+/// True for `Ctrl+Enter` with no other modifier.
+#[must_use]
+pub fn is_ctrl_enter(k: &KeyEvent) -> bool {
+    k.code == KeyCode::Enter && k.modifiers == KeyModifiers::CONTROL
+}
+
+/// True for `PageUp` or `PageDown` with no modifier.
+#[must_use]
+pub fn is_plain_page_key(k: &KeyEvent) -> bool {
+    matches!(k.code, KeyCode::PageUp | KeyCode::PageDown) && k.modifiers.is_empty()
 }
 
 /// How a child asked for mouse events to be encoded.

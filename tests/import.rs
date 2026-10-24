@@ -331,6 +331,7 @@ fn project_new_with_the_flag_registers_and_imports() {
         &f.store,
         &f.git,
         &f.namer,
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -361,6 +362,7 @@ fn open_with_the_flag_imports_before_the_interface_starts() {
         &f.store,
         &f.git,
         &f.namer,
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -388,6 +390,7 @@ fn project_import_works_on_an_existing_project() {
         &f.store,
         &f.git,
         &f.namer,
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -413,6 +416,7 @@ fn an_imported_session_resumes_its_own_transcript() {
     let clock = culm::testing::FakeClock::new(1_000);
     let recapper = culm::testing::FakeRecapper::new();
     let listener = culm::testing::FakeHookListener::new();
+    let mic = culm::testing::FakeMicrophones::default();
     let deps = culm::app::Deps {
         spawner: &spawner,
         git: &f.git,
@@ -420,6 +424,7 @@ fn an_imported_session_resumes_its_own_transcript() {
         clock: &clock,
         recapper: &recapper,
         hooks: &listener,
+        mic: &mic,
     };
     let mut app = culm::app::App::open(project, &deps, 20, 50);
     app.set_focus(0);

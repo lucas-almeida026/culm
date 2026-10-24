@@ -857,8 +857,8 @@ const SHORTCUTS: [(&str, &str); 21] = [
     ("Alt+Shift+N", "create a session"),
     ("Alt+Shift+P", "pause or resume the focused session"),
     ("Alt+Shift+R", "rename the focused session"),
-    ("Alt+Shift+F", "search the paused list"),
-    ("Alt+Shift+X", "delete the focused paused session"),
+    ("Alt+Shift+F, /", "search the paused list"),
+    ("Alt+Shift+X", "delete a paused or archived session"),
     ("Alt+Shift+A, L", "archive the session, list the archive"),
     ("Alt+Shift+G", "open or close the changes panel"),
     ("Alt+Shift+O", "move the keys to the next pane"),
@@ -870,10 +870,10 @@ const SHORTCUTS: [(&str, &str); 21] = [
         "J K, Shift+Up Down",
         "in the sidebar: reorder within its list",
     ),
-    ("Alt+Shift+D", "toggle nerd mode, for the frame rate"),
-    ("Alt+Shift+H, S", "this table, settings for every project"),
+    ("Alt+Shift+H, S, D", "this table, settings, the frame rate"),
+    ("Alt+Shift+Z", "take back the last paste in claude"),
     ("Ctrl+q", "quit"),
-    ("Shift+PageUp/Down", "scroll half a panel"),
+    ("PageUp/Down", "scroll half a panel, or reach vim"),
     ("wheel", "scroll, or reach a mouse-aware child"),
     ("drag, alt click", "select and copy, extend the selection"),
     ("middle click", "paste the last copy"),
@@ -883,8 +883,8 @@ const SHORTCUTS: [(&str, &str); 21] = [
 /// The settings that apply to every project, one switch per row.
 fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
     let width = 70.min(panel.width.saturating_sub(2));
-    // Nine lines of content, plus the two border rows.
-    let height = 11.min(panel.height);
+    // Twelve lines of content, plus the two border rows.
+    let height = 14.min(panel.height);
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
         y: panel.y + (panel.height.saturating_sub(height)) / 2,
@@ -913,6 +913,12 @@ fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
             Span::raw("  open the changes panel maximized"),
         ]),
         dim("        it then covers the session instead of sitting beside it."),
+        Line::from(""),
+        Line::from(vec![
+            switch(config.block_ctrl_z, 2),
+            Span::raw("  keep ctrl+z from claude code sessions"),
+        ]),
+        dim("        ctrl+z suspends claude, and no shell can bring it back."),
         Line::from(""),
         dim(" Up Down move   Space toggles   Esc closes"),
     ];
@@ -983,7 +989,7 @@ fn draw_archive(f: &mut Frame, app: &App, list: &ArchiveList, panel: Rect) {
         }
         lines.push(Line::from(""));
     }
-    lines.push(dim(" type to search   Enter restores   Esc closes"));
+    lines.push(dim(" Enter restores   Alt+Shift+X deletes   Esc closes"));
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" archive ")),
@@ -1369,6 +1375,7 @@ mod tests {
             clock: &clock,
             recapper: &recapper,
             hooks: &crate::testing::FakeHookListener::new(),
+            mic: &crate::testing::FakeMicrophones::default(),
         };
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         app.on_key(
@@ -1422,6 +1429,7 @@ mod tests {
             clock: &clock,
             recapper: &recapper,
             hooks: &crate::testing::FakeHookListener::new(),
+            mic: &crate::testing::FakeMicrophones::default(),
         };
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         let form = crate::app::NewSession {
@@ -1570,6 +1578,7 @@ mod tests {
             index: 0,
             name: "feat A".into(),
             answer: Answer::No,
+            archive: None,
         };
         let panel = Rect::new(10, 0, 70, 20);
         let mut terminal =
@@ -1634,6 +1643,7 @@ mod tests {
             clock: &clock,
             recapper: &recapper,
             hooks: &crate::testing::FakeHookListener::new(),
+            mic: &crate::testing::FakeMicrophones::default(),
         };
         let mut app = App::new(Project::new("spm", "/home/x/spm"));
         // An empty name is refused, which is how a status reaches the bar here.
@@ -1743,6 +1753,7 @@ mod tests {
             index: 0,
             name: "feat A".into(),
             answer: Answer::No,
+            archive: None,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(80, 20)).expect("the test backend starts");

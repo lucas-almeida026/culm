@@ -51,6 +51,7 @@ struct Fakes {
     clock: FakeClock,
     recapper: FakeRecapper,
     hooks: FakeHookListener,
+    mic: culm::testing::FakeMicrophones,
 }
 
 impl Fakes {
@@ -62,6 +63,7 @@ impl Fakes {
             clock: FakeClock::new(1_000),
             recapper: FakeRecapper::new(),
             hooks: FakeHookListener::new(),
+            mic: culm::testing::FakeMicrophones::default(),
         }
     }
 
@@ -73,6 +75,7 @@ impl Fakes {
             recapper: &self.recapper,
             clock: &self.clock,
             hooks: &self.hooks,
+            mic: &self.mic,
         }
     }
 }
@@ -667,4 +670,60 @@ fn the_list_stops_growing_at_its_widest_on_a_wide_panel() {
         20,
         "and never drops under 20"
     );
+}
+
+fn two_sessions_maximized(f: &Fakes, maximized: bool) -> App {
+    let mut app = one_session(f);
+    app.create_session(&form("feat-b", [true, false]), &f.deps())
+        .expect("the second session starts");
+    let mut config = app.config().clone();
+    config.changes_maximized = maximized;
+    app.set_config(config);
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+    app
+}
+
+#[test]
+fn choosing_a_session_closes_a_maximized_panel() {
+    let f = Fakes::new();
+    let mut app = two_sessions_maximized(&f, true);
+    assert_eq!(app.git_split(), GitSplit::Full);
+
+    app.on_key(&alt_shift('O'), &f.deps()).expect("a key");
+    app.on_key(&plain(KeyCode::Char('k')), &f.deps())
+        .expect("a key");
+    app.on_key(&plain(KeyCode::Enter), &f.deps())
+        .expect("a key");
+
+    assert_eq!(app.git_split(), GitSplit::Closed);
+    assert_eq!(app.pane(), Pane::Panel, "the chosen session takes the keys");
+}
+
+#[test]
+fn alt_zero_closes_a_maximized_panel_to_show_the_shell() {
+    let f = Fakes::new();
+    let mut app = two_sessions_maximized(&f, true);
+
+    app.on_key(
+        &KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT),
+        &f.deps(),
+    )
+    .expect("a key");
+
+    assert_eq!(app.git_split(), GitSplit::Closed);
+    assert_eq!(app.pane(), Pane::Panel);
+}
+
+#[test]
+fn choosing_a_session_keeps_a_panel_beside_it_open() {
+    let f = Fakes::new();
+    let mut app = two_sessions_maximized(&f, false);
+
+    app.on_key(&alt_shift('O'), &f.deps()).expect("a key");
+    app.on_key(&plain(KeyCode::Char('k')), &f.deps())
+        .expect("a key");
+    app.on_key(&plain(KeyCode::Enter), &f.deps())
+        .expect("a key");
+
+    assert!(matches!(app.git_split(), GitSplit::Beside(_)));
 }

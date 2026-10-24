@@ -341,7 +341,7 @@ impl Browser {
         }
     }
 
-    pub fn on_paste(&mut self, text: &str) -> Result<()> {
+    pub fn on_paste(&mut self, text: &str, deps: &Deps<'_>) -> Result<()> {
         match self.modal.as_mut() {
             Some(BrowserModal::Picker(picker)) => {
                 picker.filter.push_str(text);
@@ -355,7 +355,7 @@ impl Browser {
                 Ok(())
             }
             None if self.quitting => Ok(()),
-            None => self.app_mut().on_paste(text),
+            None => self.app_mut().on_paste(text, deps),
         }
     }
 
@@ -456,6 +456,7 @@ impl Browser {
                 }
             }
             tab.app.poll_recap(deps);
+            tab.app.flush_pastes(deps);
         }
         self.app_mut().settle_scroll();
         // Only the visible tab's changes panel reads git. A tab in the background

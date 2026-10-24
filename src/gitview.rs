@@ -348,6 +348,10 @@ impl GitView {
     }
 
     /// Opens the panel, or closes it.
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if self.open {

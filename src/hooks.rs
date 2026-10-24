@@ -222,6 +222,8 @@ pub trait HookListener: std::fmt::Debug {
     fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>>;
     /// Stops listening for one project, and removes its socket.
     fn release(&self, slug: &str);
+    /// True while a culm window listens for the project.
+    fn is_open(&self, slug: &str) -> bool;
 }
 
 /// Listens on the real Unix socket of each project.
@@ -230,13 +232,17 @@ pub struct SocketHookListener;
 
 impl HookListener for SocketHookListener {
     fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>> {
-        let path = socket_path(slug);
-        // A socket file that answers belongs to a live culm. One that refuses is
-        // left over from a crash, and `listen` replaces it.
-        if UnixStream::connect(&path).is_ok() {
+        // A socket file that refuses is left over from a crash, and `listen`
+        // replaces it.
+        if self.is_open(slug) {
             bail!("{slug} is open in another culm");
         }
-        listen(&path)
+        listen(&socket_path(slug))
+    }
+
+    /// A socket file that answers belongs to a live culm.
+    fn is_open(&self, slug: &str) -> bool {
+        UnixStream::connect(socket_path(slug)).is_ok()
     }
 
     fn release(&self, slug: &str) {

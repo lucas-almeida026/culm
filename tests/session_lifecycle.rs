@@ -82,6 +82,7 @@ struct Fakes {
     clock: FakeClock,
     recapper: FakeRecapper,
     hooks: FakeHookListener,
+    mic: culm::testing::FakeMicrophones,
 }
 
 impl Fakes {
@@ -97,6 +98,7 @@ impl Fakes {
             clock: FakeClock::new(1_000),
             recapper: FakeRecapper::new(),
             hooks: FakeHookListener::new(),
+            mic: culm::testing::FakeMicrophones::default(),
         }
     }
 
@@ -108,6 +110,7 @@ impl Fakes {
             recapper: &self.recapper,
             clock: &self.clock,
             hooks: &self.hooks,
+            mic: &self.mic,
         }
     }
 }
@@ -467,7 +470,8 @@ fn a_paste_also_answers_a_permission_prompt() {
         ..Default::default()
     });
 
-    app.on_paste("yes").expect("the paste is forwarded");
+    app.on_paste("yes", &f.deps())
+        .expect("the paste is forwarded");
 
     assert_eq!(app.entries()[0].attention, Attention::None);
 }
@@ -577,7 +581,7 @@ fn paste_reaches_the_focused_session_bracketed() {
     app.create_session(&form("one", [false, false]), &f.deps())
         .expect("one starts");
 
-    app.on_paste("first\nsecond\nthird")
+    app.on_paste("first\nsecond\nthird", &f.deps())
         .expect("paste is forwarded");
 
     let pty = f.spawner.last_pty().expect("a pty exists");
@@ -1640,7 +1644,8 @@ fn a_paste_never_answers_the_confirmation() {
     let f = Fakes::new();
     let mut app = confirming_delete(&f);
 
-    app.on_paste("yes").expect("the paste is handled");
+    app.on_paste("yes", &f.deps())
+        .expect("the paste is handled");
 
     assert!(app.confirm_delete().is_some(), "the form is still open");
     assert_eq!(app.entries().len(), 1);
@@ -1727,6 +1732,7 @@ fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -1784,6 +1790,7 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     )
@@ -1812,6 +1819,7 @@ fn rm_refuses_an_unknown_project() {
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
+        &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
     );
@@ -2169,7 +2177,8 @@ fn keys_go_to_the_rename_form_and_never_to_the_child() {
         .expect("the form opens");
     app.on_key(&key(KeyCode::Char('z'), KeyModifiers::NONE), &f.deps())
         .expect("the key is handled");
-    app.on_paste("pasted").expect("the paste is handled");
+    app.on_paste("pasted", &f.deps())
+        .expect("the paste is handled");
 
     assert_eq!(pty.written_utf8(), "", "no byte reached the session");
     assert_eq!(
@@ -2764,7 +2773,8 @@ fn keys_go_to_the_search_box_and_never_to_the_child() {
 
     find(&mut app, &f);
     type_into(&mut app, &f, "abc");
-    app.on_paste("pasted").expect("the paste is handled");
+    app.on_paste("pasted", &f.deps())
+        .expect("the paste is handled");
 
     assert_eq!(pty.written_utf8(), "", "no byte reached the session");
     assert_eq!(app.filter(), "abcpasted");
@@ -2814,6 +2824,7 @@ fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
+        &f.hooks,
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new(ROOT),
     )
@@ -3117,7 +3128,8 @@ fn no_key_reaches_the_child_while_the_shortcut_table_is_open() {
 
     app.on_key(&key(KeyCode::Char('z'), KeyModifiers::NONE), &f.deps())
         .expect("the key is handled");
-    app.on_paste("pasted").expect("the paste is handled");
+    app.on_paste("pasted", &f.deps())
+        .expect("the paste is handled");
 
     assert_eq!(pty.written_utf8(), "");
     assert!(app.help_open(), "an ordinary key leaves the table open");
@@ -3595,12 +3607,26 @@ fn escape_in_the_sidebar_returns_the_keys_without_a_switch() {
 }
 
 #[test]
-fn a_letter_typed_in_the_sidebar_starts_the_paused_search() {
+fn a_letter_typed_in_the_sidebar_starts_no_search() {
     let f = Fakes::new();
     let mut app = three_sessions(&f);
 
     press(&mut app, &f, alt_shift('O'));
     type_text(&mut app, &f, "th");
+
+    assert!(!app.filter_focused());
+    assert_eq!(app.filter(), "");
+    assert_eq!(app.pane(), Pane::Sidebar);
+    assert_eq!(written(&f, "one"), "", "no key reaches a child either");
+}
+
+#[test]
+fn a_slash_in_the_sidebar_starts_the_paused_search() {
+    let f = Fakes::new();
+    let mut app = three_sessions(&f);
+
+    press(&mut app, &f, alt_shift('O'));
+    type_text(&mut app, &f, "/th");
 
     assert!(app.filter_focused());
     assert_eq!(app.filter(), "th");
@@ -3617,7 +3643,8 @@ fn a_paste_while_the_sidebar_holds_the_keys_reaches_no_child() {
     let mut app = three_sessions(&f);
 
     press(&mut app, &f, alt_shift('O'));
-    app.on_paste("rm -rf /").expect("the paste is handled");
+    app.on_paste("rm -rf /", &f.deps())
+        .expect("the paste is handled");
 
     assert_eq!(written(&f, "one"), "");
 }
@@ -4005,4 +4032,412 @@ fn a_session_created_while_the_shell_is_on_screen_takes_the_panel() {
         .expect("one starts");
 
     assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
+}
+
+fn pulse_source(spec: &SessionSpec) -> Option<String> {
+    spec.env
+        .iter()
+        .find(|(k, _)| k == culm::mic::PULSE_SOURCE)
+        .map(|(_, v)| v.clone())
+}
+
+#[test]
+fn a_session_records_from_the_wanted_microphone() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    let spec = f.spawner.specs().pop().expect("a spawn happened");
+    assert_eq!(
+        pulse_source(&spec).as_deref(),
+        Some(culm::testing::FAKE_MIC)
+    );
+    assert_ne!(app.status(), culm::app::NO_MIC);
+}
+
+#[test]
+fn a_session_with_no_wanted_microphone_starts_on_the_default_and_says_so() {
+    let f = Fakes::new();
+    f.mic
+        .set(&["alsa_input.platform-snd_aloop.0.analog-stereo"]);
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts without a microphone");
+
+    let spec = f.spawner.specs().pop().expect("a spawn happened");
+    assert_eq!(pulse_source(&spec), None);
+    assert_eq!(app.status(), culm::app::NO_MIC);
+}
+
+#[test]
+fn a_session_starts_when_the_sound_server_is_unreachable() {
+    let f = Fakes::new();
+    f.mic.fail();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts without pactl");
+
+    assert_eq!(app.active_count(), 1);
+    let spec = f.spawner.specs().pop().expect("a spawn happened");
+    assert_eq!(pulse_source(&spec), None);
+    assert_eq!(app.status(), culm::app::NO_MIC);
+}
+
+#[test]
+fn a_resume_picks_a_microphone_that_appeared_after_the_first_start() {
+    let f = Fakes::new();
+    f.mic.set(&[]);
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+
+    f.mic
+        .set(&["NoiseTorch Microphone for Family 17h/19h HD Audio Controller"]);
+    app.toggle_pause(&f.deps()).expect("resume succeeds");
+
+    let spec = f.spawner.specs().pop().expect("a second spawn happened");
+    assert_eq!(
+        pulse_source(&spec).as_deref(),
+        Some("NoiseTorch Microphone for Family 17h/19h HD Audio Controller")
+    );
+    assert_eq!(app.status(), "one resumed");
+}
+
+#[test]
+fn plain_page_up_scrolls_the_history_of_a_session_on_the_main_screen() {
+    let f = Fakes::with_output(&numbered_lines());
+    let mut app = scrolled_session(&f);
+
+    press(&mut app, &f, key(KeyCode::PageUp, KeyModifiers::NONE));
+
+    assert_eq!(scrollback_of(&app), 3, "half of a six row panel");
+    assert!(
+        !written(&f, "one").contains("\x1b[5~"),
+        "the child gets no key"
+    );
+    press(&mut app, &f, key(KeyCode::PageDown, KeyModifiers::NONE));
+    assert_eq!(scrollback_of(&app), 0);
+}
+
+#[test]
+fn a_full_screen_program_pages_its_own_text() {
+    let f = Fakes::with_output(b"\x1b[?1049hfull screen");
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    let session = app.entries()[0].live.as_ref().expect("one is live");
+    assert!(session.wait_for_text("full screen", Duration::from_secs(1)));
+
+    press(&mut app, &f, key(KeyCode::PageUp, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::PageDown, KeyModifiers::NONE));
+
+    assert_eq!(written(&f, "one"), "\x1b[5~\x1b[6~");
+}
+
+#[test]
+fn ctrl_enter_reaches_a_claude_session_as_its_own_key() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::CONTROL));
+
+    assert_eq!(written(&f, "one"), "\x1b[13;5u");
+}
+
+#[test]
+fn ctrl_enter_in_the_shell_stays_a_plain_enter() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    assert_eq!(app.focus(), Focus::Shell);
+
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::CONTROL));
+
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert_eq!(shell.pty.written_utf8(), "\r");
+}
+
+#[test]
+fn an_archived_session_is_deleted_from_the_archive_list_without_a_restore() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    focus_named(&mut app, "one");
+    keep_transcript(&f, &app, "one");
+    app.archive_focused(&f.deps()).expect("one is archived");
+    let spawned = f.spawner.count();
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, alt_shift('X'));
+    assert_eq!(
+        app.confirm_delete().map(|c| c.name.as_str()),
+        Some("one"),
+        "the delete asks first"
+    );
+    press(&mut app, &f, key(KeyCode::Char('y'), KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    let names: Vec<&str> = app.entries().iter().map(|e| e.name()).collect();
+    assert_eq!(names, vec!["two"]);
+    assert_eq!(f.spawner.count(), spawned, "nothing was restored");
+    assert!(app.archive_list().is_some(), "the archive list comes back");
+    assert_eq!(
+        app.visible().map(culm::app::Entry::name),
+        Some("two"),
+        "the visible session stays the same"
+    );
+    let saved = f.store.project("spm").expect("the project was saved");
+    assert_eq!(saved.sessions.len(), 1, "the delete is saved");
+}
+
+#[test]
+fn escape_on_an_archived_delete_keeps_the_session_and_the_list() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app.archive_focused(&f.deps()).expect("one is archived");
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, alt_shift('X'));
+    press(&mut app, &f, key(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_eq!(app.entries().len(), 1);
+    assert!(app.archive_list().is_some());
+}
+
+#[test]
+fn deleting_a_session_above_the_visible_one_keeps_the_visible_one() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    for name in ["one", "two", "three"] {
+        app.create_session(&form(name, [false, false]), &f.deps())
+            .expect("the session starts");
+    }
+    focus_named(&mut app, "two");
+    press(&mut app, &f, alt_shift('A'));
+    focus_named(&mut app, "three");
+    let before = app.visible().map(|e| e.name().to_string());
+
+    press(&mut app, &f, alt_shift('L'));
+    press(&mut app, &f, alt_shift('X'));
+    press(&mut app, &f, key(KeyCode::Char('y'), KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.visible().map(|e| e.name().to_string()), before);
+}
+
+fn ctrl_z() -> KeyEvent {
+    key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn ctrl_z_never_reaches_a_claude_session_by_default() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    press(&mut app, &f, ctrl_z());
+
+    assert_eq!(written(&f, "one"), "", "claude would suspend itself");
+    assert_eq!(app.status(), culm::app::CTRL_Z_BLOCKED);
+}
+
+#[test]
+fn ctrl_z_reaches_a_claude_session_when_the_setting_is_off() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.set_config(culm::config::Config {
+        block_ctrl_z: false,
+        ..culm::config::Config::default()
+    });
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+
+    press(&mut app, &f, ctrl_z());
+
+    assert_eq!(written(&f, "one"), "\x1a");
+}
+
+#[test]
+fn ctrl_z_still_reaches_the_shell() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    assert_eq!(app.focus(), Focus::Shell);
+
+    press(&mut app, &f, ctrl_z());
+
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert_eq!(shell.pty.written_utf8(), "\x1a", "job control needs it");
+}
+
+#[test]
+fn space_on_the_third_setting_lets_ctrl_z_through_and_saves_it() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    press(&mut app, &f, alt_shift('S'));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Down, KeyModifiers::NONE));
+    press(&mut app, &f, key(KeyCode::Char(' '), KeyModifiers::NONE));
+
+    assert!(!app.config().block_ctrl_z);
+    assert!(!app.config().changes_maximized, "the other switches stay");
+    assert!(
+        !f.store.load_config().expect("saved").block_ctrl_z,
+        "a setting is written at once"
+    );
+}
+
+const PASTED: &str = "\x1b[200~X\x1b[201~";
+
+fn one_live(f: &Fakes) -> App {
+    let mut app = App::new(project());
+    app.create_session(&form("one", [false, false]), &f.deps())
+        .expect("one starts");
+    app
+}
+
+#[test]
+fn a_paste_right_after_typing_waits_a_second_then_reaches_claude() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    type_text(&mut app, &f, "hi");
+    f.clock.advance_millis(200);
+
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+    assert_eq!(written(&f, "one"), "hi", "the paste waits");
+
+    f.clock.advance_millis(799);
+    app.flush_pastes(&f.deps());
+    assert_eq!(written(&f, "one"), "hi");
+    f.clock.advance_millis(1);
+    app.flush_pastes(&f.deps());
+    assert_eq!(written(&f, "one"), format!("hi{PASTED}"));
+}
+
+#[test]
+fn a_paste_after_a_pause_reaches_claude_at_once() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    type_text(&mut app, &f, "hi");
+    f.clock.advance_millis(1000);
+
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+
+    assert_eq!(written(&f, "one"), format!("hi{PASTED}"));
+}
+
+#[test]
+fn a_key_during_the_wait_sends_the_paste_first() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    type_text(&mut app, &f, "hi");
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+    type_text(&mut app, &f, "!");
+
+    assert_eq!(written(&f, "one"), format!("hi{PASTED}!"));
+}
+
+#[test]
+fn alt_shift_z_sends_claude_its_undo_after_a_paste() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+
+    press(&mut app, &f, alt_shift('Z'));
+
+    assert_eq!(written(&f, "one"), format!("{PASTED}\x1f"));
+}
+
+#[test]
+fn alt_shift_z_on_a_waiting_paste_drops_it_and_sends_nothing() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    type_text(&mut app, &f, "hi");
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+
+    press(&mut app, &f, alt_shift('Z'));
+    f.clock.advance_millis(5000);
+    app.flush_pastes(&f.deps());
+
+    assert_eq!(written(&f, "one"), "hi", "the paste never reaches claude");
+}
+
+#[test]
+fn alt_shift_z_takes_back_an_expanded_paste_whole() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    app.on_paste("X", &f.deps()).expect("the first paste");
+    f.clock.advance_millis(3000);
+    app.on_paste("X", &f.deps())
+        .expect("the same paste again expands it");
+
+    press(&mut app, &f, alt_shift('Z'));
+
+    assert_eq!(written(&f, "one"), format!("{PASTED}{PASTED}\x1f\x1f"));
+}
+
+#[test]
+fn alt_shift_z_after_typing_undoes_nothing_and_says_so() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+    f.clock.advance_millis(3000);
+    type_text(&mut app, &f, "typed");
+
+    press(&mut app, &f, alt_shift('Z'));
+
+    assert_eq!(written(&f, "one"), format!("{PASTED}typed"));
+    assert_eq!(app.status(), culm::app::UNDO_NO_PASTE);
+}
+
+#[test]
+fn ctrl_v_counts_as_a_paste_for_the_undo() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+
+    press(&mut app, &f, key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    press(&mut app, &f, alt_shift('Z'));
+
+    assert_eq!(written(&f, "one"), "\x16\x1f");
+}
+
+#[test]
+fn a_paste_in_the_shell_never_waits_and_alt_shift_z_leaves_it() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    assert_eq!(app.focus(), Focus::Shell);
+    type_text(&mut app, &f, "ls ");
+
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+    press(&mut app, &f, alt_shift('Z'));
+
+    let shell = f.spawner.spawn_named("shell").expect("the shell spawned");
+    assert_eq!(shell.pty.written_utf8(), format!("ls {PASTED}"));
+    assert_eq!(app.status(), culm::app::UNDO_NO_SHELL);
+}
+
+#[test]
+fn a_waiting_paste_still_reaches_its_session_after_a_switch() {
+    let f = Fakes::new();
+    let mut app = one_live(&f);
+    app.create_session(&form("two", [false, false]), &f.deps())
+        .expect("two starts");
+    focus_named(&mut app, "one");
+    type_text(&mut app, &f, "hi");
+    app.on_paste("X", &f.deps()).expect("the paste is handled");
+
+    focus_named(&mut app, "two");
+    f.clock.advance_millis(1000);
+    app.flush_pastes(&f.deps());
+
+    assert_eq!(written(&f, "one"), format!("hi{PASTED}"));
+    assert_eq!(written(&f, "two"), "");
 }

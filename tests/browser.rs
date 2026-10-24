@@ -23,6 +23,7 @@ struct Fakes {
     clock: FakeClock,
     recapper: FakeRecapper,
     hooks: FakeHookListener,
+    mic: culm::testing::FakeMicrophones,
 }
 
 impl Fakes {
@@ -40,6 +41,7 @@ impl Fakes {
             clock: FakeClock::new(1_000),
             recapper: FakeRecapper::new(),
             hooks: FakeHookListener::new(),
+            mic: culm::testing::FakeMicrophones::default(),
         };
         let mut registry = f.store.load_registry().expect("load");
         for slug in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
@@ -59,6 +61,7 @@ impl Fakes {
             clock: &self.clock,
             recapper: &self.recapper,
             hooks: &self.hooks,
+            mic: &self.mic,
         }
     }
 
@@ -739,6 +742,7 @@ fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
+        &f.hooks,
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/home/x/a"),
     )
@@ -854,6 +858,23 @@ fn renaming_a_project_renames_it_in_every_workspace() {
         f.store.workspaces().find("w").map(|w| w.projects.clone()),
         Some(vec!["core".to_string(), "b".to_string()])
     );
+}
+
+#[test]
+fn a_project_open_in_a_window_is_not_renamed() {
+    let f = Fakes::new();
+    let b = f.open(&["a"]);
+
+    let err = cli(
+        &f,
+        &["culm", "project", "alter", "name", "core", "--project", "a"],
+    )
+    .expect_err("the rename is refused");
+
+    assert!(err.to_string().contains("open in culm"), "{err}");
+    assert!(f.store.project("a").is_some(), "the project keeps its name");
+    assert!(f.store.project("core").is_none());
+    drop(b);
 }
 
 // The tab bar, as drawn
