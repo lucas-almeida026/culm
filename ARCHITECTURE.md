@@ -30,11 +30,12 @@ The process holds one hierarchy:
 | `src/pty.rs` | The process boundary: `SessionSpec`, `Pty`, `Child`, and `PtySpawner`. |
 | `src/keys.rs` | Host actions and key encoding. Pure functions. |
 | `src/ui.rs` | Rendering, layout, and the hit boxes that map a click back to a tab, a row, or a cell. |
-| `src/hooks.rs` | Attention markers: the hook settings merge, the marker state machine, and the socket. |
+| `src/hooks.rs` | Attention markers: the hook settings merge, the marker state machine, and the socket, which also carries commands. |
 | `src/project.rs` | Projects, session records, the registry, and slugs. Pure values. |
 | `src/workspace.rs` | Workspaces. Pure values. |
 | `src/store.rs` | Every file read and write, behind `Store`. |
-| `src/cli.rs` | The command line. Every project, repository, and workspace operation. |
+| `src/cli.rs` | The command line. Every project, repository, workspace, and session registration operation, and the adoption of existing worktrees. |
+| `src/command.rs` | What a session registers: its ticket, its port number, and its worktrees. `apply` holds every rule, and both the window and the command line call it. Pure. |
 | `src/recap.rs` | The headless recap child, behind `Recapper`. |
 | `src/namer.rs` | The headless child that names an imported session, behind `Namer`. |
 | `src/transcript.rs` | Reads a Claude Code transcript: its head for an import, and the files a session wrote for the changes panel. |
@@ -42,7 +43,7 @@ The process holds one hierarchy:
 | `src/stats.rs` | Memory sampling from `/proc`, behind `MemoryProbe`. |
 | `src/clock.rs` | The time, behind `Clock`. |
 | `src/mic.rs` | The microphone a session records from, picked from `pactl` output, behind `Microphones`. |
-| `src/git.rs` | Worktree commands and the read-only git reads of the changes panel, behind `Git`. |
+| `src/git.rs` | The read-only git reads of the changes panel and of a worktree registration, behind `Git`. |
 | `src/diff.rs` | The changes panel's data: git's output parsed, two versions of a file laid side by side, and syntax colors. Pure functions, except the color grammars it loads. |
 | `src/gitview.rs` | The state of the changes panel: repository tabs, lists, picks, the diff on screen, keys, and clicks. |
 | `src/gitui.rs` | Draws the changes panel. |
@@ -76,7 +77,9 @@ The pseudoterminal slave is dropped right after the spawn. A slave that stays op
 - culm generates a UUID v4 for a new session and passes `--session-id <uuid>`.
 - Every later start passes `--resume <uuid>`, which reloads the whole conversation.
 - The `started` flag in the record chooses between the two.
-- culm keeps the session id, the name, the slug, the working directory, and the repositories. It never keeps the conversation.
+- culm keeps the session id, the name, the slug, the working directory, and what the session registered: its worktrees, its ticket, and its port number. It never keeps the conversation.
+- Every session starts at the project root. Its environment carries `CULM_SESSION` (its id) and `CULM_PROJECT` (the project slug), so `culm session` run inside it needs no flag.
+- A session that registered something gets it at each start through `--append-system-prompt`: the ticket, the port number, and each worktree with its branch. A session that registered nothing gets no system prompt from culm.
 
 ### States
 
@@ -151,6 +154,18 @@ culm turns on full mouse reporting, so the terminal reports every move.
 - **Answered permission:** no hook reports that the user answered a permission prompt. The keystroke that reaches the session clears the permission marker.
 - **No output parsing:** culm reads no terminal output to decide a state.
 
+### Commands on the same socket
+
+The window owns the state of an open project and writes it on the tick, so a command line that wrote the file would lose its change on the next tick. A `culm session` command therefore goes through the socket when the project is open.
+
+1. The command line asks `HookListener::is_open`. A closed project is changed in its file with `command::apply`, and the command ends there.
+2. For an open project, the command line writes `{"culm": <command>}`, closes its write half, and waits up to 3 s for the reply.
+3. The listener tells a command from a hook payload by the `culm` key. A hook payload never carries it.
+4. The listener hands the command and a reply channel to the tab, and waits for the reply on a thread of its own, up to 2 s, so hooks keep flowing.
+5. `Browser::poll` gives the command to `App::command`, which calls `command::apply`, marks the project dirty, and sends the reply back.
+
+A refused command makes the command line exit with an error, so a script sees it.
+
 ## State on disk
 
 | File | Holds |
@@ -166,17 +181,31 @@ culm turns on full mouse reporting, so the terminal reports every move.
 - A field added to a record carries `#[serde(default)]`, so an older file still reads.
 - A new enum variant is the exception. culm 0.1.1 refuses a project file that holds an `archived` session.
 
-## Worktrees
+## Worktrees, tickets, and port numbers
 
-A session that edits a repository gets `git worktree add -b <session-slug>` under `<project root>/.worktrees/<repo>-<session-slug>`. Each chosen repository gets one worktree, and every worktree of the session shares one branch name. A rename changes the displayed name only, because a running session holds its paths open. culm creates and removes worktrees. It never commits, never pushes, and never deletes a branch.
+culm never creates, changes, or removes a worktree. Claude Code makes them, in whatever layout the project's `CLAUDE.md` asks for, and registers them:
+
+| Command | Effect |
+| --- | --- |
+| `culm session worktree add <path>` | `Git::worktree_info` reads the checkout that holds the path: its top, its repository name, and its branch. The top is recorded, so a path inside the worktree works too. Registering the same top again refreshes its branch. |
+| `culm session worktree rm <path>` | Forgets the worktree. A worktree already gone from disk is forgotten by its path. |
+| `culm session ticket <key>` | Records the ticket, trimmed. |
+| `culm session port <0-9>` | Records the port number. Another session may hold the same number, and the reply names it. |
+| `culm port list` | Each number from 0 to 9, and the sessions that hold it. An archived session gives its number back until it is restored. |
+
+culm gives no meaning to a port number. The project's `CLAUDE.md` says which port each number stands for, and which numbers to avoid.
+
+`culm session adopt` finds worktrees that sessions used before they registered anything. It reads each transcript twice: the `cwd` stamp of every line, which says where the session's shell stood, and the files the session wrote. A directory counts when `Git::worktree_info` names a linked worktree. A main checkout never counts, because every session shares it, and a worktree under the temporary directory is a scratch copy. The user picks the worktrees to register for each session, or `--yes` registers all of them. On 2026-10-24, on the maintainer's `spm` project, it read the transcripts of 28 sessions in 2.8 s with a debug build, and offered 27 worktrees to 14 of them.
 
 ## The changes panel
 
 `Alt+Shift+G` opens a read-only panel that shows what the visible session changed. It never writes to a repository.
 
-- **Tabs:** one tab per repository of the visible session. The worktrees culm made for the session come first. Every other repository the session wrote a file in follows, in the order the session first wrote in it. `transcript::edited_files` reads the written files from the transcript, and `Git::toplevel` names the repository that holds each one. The shell's panel shows the repositories registered with the project.
+- **Tabs:** one tab per repository of the visible session. The worktrees the session registered come first. Every other repository the session wrote a file in follows, in the order the session first wrote in it. `transcript::edited_files` reads the written files from the transcript, and `Git::toplevel` names the repository that holds each one. The shell's panel shows the repositories registered with the project.
+- **Shared repositories:** when the session registered at least one worktree, every other repository it wrote in is shared, such as a docs repository every session writes to. Its "Changes" list shows only the files this session wrote, and its count shows the changes left out, as `Changes (1+3)`. `a` shows every change, and `a` again goes back. A session that registered nothing sees every change, because nothing says which repository is its own.
+- **Title:** the panel title names the ticket and the port number of the session it follows.
 - **Lists:** "Changes" lists every file that differs from `HEAD`, from `git status --porcelain=v2`. "History" lists the last 200 commits of `HEAD`, and beside them the files of the picked commit, against its first parent.
-- **Reads:** the panel reads the transcript and git when it opens, when the visible session changes, when the followed session sends `Stop`, and on `r`. No other event reads anything. A hook for another session reads nothing.
+- **Reads:** the panel reads the transcript and git when it opens, when the visible session changes, when the followed session sends `Stop`, when a command changes a session record, on `r`, and on `a`. No other event reads anything. A hook for another session reads nothing.
 - **Diff:** `diff::side_by_side` lays the old version left and the new version right, three lines of context around each change. A removed line beside an added line is a pair, and the words that differ are marked. A file over 1 MiB or a binary file shows a notice instead.
 - **Colors:** a thread computes the syntax colors of both versions, because coloring costs about 0.1 ms per line. The diff shows plain until the colors land. A file over 256 KiB gets no colors.
 - **Size:** the panel opens on half of the room right of the sidebar, or over the whole session when `changes-maximized` is on. The panel's share and its list's share are dragged and saved per project. The list stays between 20 and 40 columns, and the history between 32 and 64.
@@ -236,7 +265,7 @@ These hold today. A change that breaks one of them breaks culm in a way no test 
 ### About identifiers
 
 - A slug is the identifier of a project and of a workspace. It names the state file, the socket, and the entries inside workspaces. A project rename moves the state file and rewrites every workspace that holds the project.
-- A session slug names the branch and the worktree directories, and never changes.
+- A session slug never changes. Inside a project, `culm session --session` finds a session by its id, then its slug, then its name.
 - A digit addresses a tab, and only a tab. Eight tabs and eight active sessions keep every count within one digit.
 
 ## Testing
@@ -246,11 +275,11 @@ Every side effect enters through a trait, and each trait has a fake in `src/test
 | Trait | Real | Fake |
 | --- | --- | --- |
 | `PtySpawner` | `SystemPtySpawner` | `FakeSpawner` replays fixed output and records every write. |
-| `Git` | `SystemGit` | `FakeGit` records worktree calls. |
+| `Git` | `SystemGit` | `FakeGit` answers status, history, files, and worktree reads from what the test set. |
 | `Store` | `FsStore` | `MemoryStore` keeps every file in memory and counts the writes. |
 | `Clock` | `SystemClock` | `FakeClock` moves only when a test sets it. |
 | `Recapper` | `ClaudeRecapper` | `FakeRecapper` answers after a set number of passes and counts kills. |
-| `HookListener` | `SocketHookListener` | `FakeHookListener` hands the test a sender per project. |
+| `HookListener` | `SocketHookListener` | `FakeHookListener` hands the test a sender per project, delivers commands to the window, and answers the command line with a reply the test sets. |
 | `MemoryProbe` | `ProcMemoryProbe` | `FakeMemoryProbe` returns set values. |
 | `Namer` | `ClaudeNamer` | `FakeNamer` answers by prompt text. |
 | `Microphones` | `PactlMicrophones` | `FakeMicrophones` holds one wanted source until a test sets others, or fails. |

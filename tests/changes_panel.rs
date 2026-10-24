@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use culm::app::{App, Deps, Field, NewSession, Pane};
+use culm::app::{App, Deps, NewSession, Pane};
 use culm::diff::{LineKind, Row};
 use culm::gitview::{GitSplit, GitTab};
 use culm::hooks::HookEvent;
@@ -36,12 +36,35 @@ fn project() -> Project {
     project
 }
 
-fn form(name: &str, chosen: [bool; 2]) -> NewSession {
-    NewSession {
-        name: name.into(),
-        chosen: chosen.to_vec(),
-        field: Field::Name,
+fn form(name: &str) -> NewSession {
+    NewSession { name: name.into() }
+}
+
+/// Creates a session and registers `worktrees` for it, each as `(repo, path)`, as
+/// `culm session worktree add` would.
+fn session_with(app: &mut App, f: &Fakes, name: &str, worktrees: &[(&str, &str)]) -> String {
+    app.create_session(&form(name), &f.deps())
+        .expect("the session starts");
+    let id = app
+        .entries()
+        .iter()
+        .find(|e| e.record.name == name)
+        .expect("the session is listed")
+        .record
+        .id
+        .clone();
+    for (repo, path) in worktrees {
+        let reply = app.command(&culm::command::Command::WorktreeAdd {
+            session: id.clone(),
+            worktree: culm::project::SessionRepo {
+                name: (*repo).into(),
+                worktree: PathBuf::from(path),
+                branch: name.into(),
+            },
+        });
+        assert!(reply.ok, "{}", reply.text);
     }
+    id
 }
 
 struct Fakes {
@@ -101,11 +124,16 @@ fn stop(session_id: &str) -> HookEvent {
     }
 }
 
-/// An app with one session, `feat-a`, on both repositories.
+/// An app with one session, `feat-a`, that registered a worktree of both
+/// repositories.
 fn one_session(f: &Fakes) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("feat-a", [true, true]), &f.deps())
-        .expect("the session starts");
+    session_with(
+        &mut app,
+        f,
+        "feat-a",
+        &[("api-mate", API_A), ("crm-mate", CRM_A)],
+    );
     app
 }
 
@@ -228,8 +256,7 @@ fn r_reads_git_again_on_demand() {
 fn switching_sessions_points_the_panel_at_the_other_worktrees() {
     let f = Fakes::new();
     let mut app = one_session(&f);
-    app.create_session(&form("feat-b", [true, false]), &f.deps())
-        .expect("the second session starts");
+    session_with(&mut app, &f, "feat-b", &[("api-mate", API_B)]);
     app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
     assert_eq!(app.git().repos[0].path, Path::new(API_B));
 
@@ -437,11 +464,10 @@ fn edit_line(path: &str) -> String {
     .to_string()
 }
 
-/// An app with one session that culm made no worktree for, as in a project whose
-/// sessions make their own.
+/// An app with one session that registered no worktree.
 fn bare_session(f: &Fakes) -> (App, String) {
     let mut app = App::new(project());
-    app.create_session(&form("club-1005", [false, false]), &f.deps())
+    app.create_session(&form("club-1005"), &f.deps())
         .expect("the session starts");
     let id = app.entries()[0].record.id.clone();
     (app, id)
@@ -674,8 +700,7 @@ fn the_list_stops_growing_at_its_widest_on_a_wide_panel() {
 
 fn two_sessions_maximized(f: &Fakes, maximized: bool) -> App {
     let mut app = one_session(f);
-    app.create_session(&form("feat-b", [true, false]), &f.deps())
-        .expect("the second session starts");
+    session_with(&mut app, f, "feat-b", &[("api-mate", API_B)]);
     let mut config = app.config().clone();
     config.changes_maximized = maximized;
     app.set_config(config);
@@ -726,4 +751,130 @@ fn choosing_a_session_keeps_a_panel_beside_it_open() {
         .expect("a key");
 
     assert!(matches!(app.git_split(), GitSplit::Beside(_)));
+}
+
+#[test]
+fn a_worktree_registered_while_the_panel_is_open_appears_without_waiting_for_a_turn() {
+    let f = Fakes::new();
+    let (mut app, id) = bare_session(&f);
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+    assert!(app.git().repos.is_empty());
+
+    let reply = app.command(&culm::command::Command::WorktreeAdd {
+        session: id,
+        worktree: culm::project::SessionRepo {
+            name: "api-mate".into(),
+            worktree: PathBuf::from(API_A),
+            branch: "feature/x".into(),
+        },
+    });
+    assert!(reply.ok);
+    app.poll_git(&f.deps());
+
+    let tabs: Vec<&str> = app.git().repos.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(tabs, vec!["api-mate"]);
+}
+
+/// A session with a registered worktree that also wrote one file in a docs
+/// repository other sessions write to.
+fn session_with_shared_docs(f: &Fakes) -> App {
+    f.git.add_toplevel("/home/x/spm/docs");
+    f.git.set_status(
+        Path::new("/home/x/spm/docs"),
+        &[
+            modified("refinement/CLUB-1.md"),
+            modified("refinement/CLUB-2.md"),
+        ]
+        .concat(),
+    );
+    let mut app = App::new(project());
+    let id = session_with(&mut app, f, "club-1", &[("api-mate", API_A)]);
+    f.store.put_transcript(
+        &transcript_dir(),
+        &id,
+        1,
+        &edit_line("/home/x/spm/docs/refinement/CLUB-1.md"),
+    );
+    app
+}
+
+#[test]
+fn a_shared_repository_lists_only_the_files_this_session_wrote() {
+    let f = Fakes::new();
+    let mut app = session_with_shared_docs(&f);
+
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+
+    let docs = &app.git().repos[1];
+    assert_eq!(docs.path, Path::new("/home/x/spm/docs"));
+    let paths: Vec<&str> = docs.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, vec!["refinement/CLUB-1.md"]);
+    assert_eq!(docs.hidden, 1, "the panel says one change was left out");
+}
+
+#[test]
+fn the_a_key_shows_every_change_of_a_shared_repository_and_back() {
+    let f = Fakes::new();
+    let mut app = session_with_shared_docs(&f);
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+
+    app.on_key(&plain(KeyCode::Char('a')), &f.deps())
+        .expect("a key");
+    assert_eq!(app.git().repos[1].changes.len(), 2);
+    assert_eq!(app.git().repos[1].hidden, 0);
+
+    app.on_key(&plain(KeyCode::Char('a')), &f.deps())
+        .expect("a key");
+    assert_eq!(app.git().repos[1].changes.len(), 1);
+}
+
+#[test]
+fn a_session_without_worktrees_still_sees_every_change() {
+    let f = Fakes::new();
+    f.git.add_toplevel("/home/x/spm/docs");
+    f.git.set_status(
+        Path::new("/home/x/spm/docs"),
+        &[
+            modified("refinement/CLUB-1.md"),
+            modified("refinement/CLUB-2.md"),
+        ]
+        .concat(),
+    );
+    let (mut app, id) = bare_session(&f);
+    f.store.put_transcript(
+        &transcript_dir(),
+        &id,
+        1,
+        &edit_line("/home/x/spm/docs/refinement/CLUB-1.md"),
+    );
+
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+
+    assert_eq!(
+        app.git().repos[0].changes.len(),
+        2,
+        "with no worktree registered, no repository counts as shared"
+    );
+}
+
+#[test]
+fn the_panel_title_names_the_ticket_and_the_port_number() {
+    let f = Fakes::new();
+    let (mut app, id) = bare_session(&f);
+    for command in [
+        culm::command::Command::Ticket {
+            session: id.clone(),
+            ticket: Some("CLUB-1005".into()),
+        },
+        culm::command::Command::Port {
+            session: id,
+            port: Some(4),
+        },
+    ] {
+        assert!(app.command(&command).ok);
+    }
+
+    app.on_key(&alt_shift('G'), &f.deps()).expect("a key");
+
+    assert_eq!(app.git().caption.as_deref(), Some("CLUB-1005 · port 4"));
 }

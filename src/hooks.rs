@@ -1,5 +1,8 @@
-//! Attention markers. A Claude Code hook posts one payload to a Unix socket that the
-//! running interface owns, and the interface marks the matching session.
+//! Attention markers, and commands for an open project. A Claude Code hook posts one
+//! payload to a Unix socket that the running interface owns, and the interface marks
+//! the matching session. The command line posts a `Command` on the same socket and
+//! waits for the reply, so a change to an open project goes through the window that
+//! owns its state.
 //!
 //! The state machine and the settings merge are pure, so both are unit tested. Only
 //! `listen` and `send_from_stdin` touch the operating system.
@@ -7,7 +10,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -110,6 +113,21 @@ pub struct HookEvent {
     #[serde(default)]
     pub notification_type: Option<String>,
 }
+
+/// One message on a project's socket.
+#[derive(Debug)]
+pub enum Inbound {
+    Hook(HookEvent),
+    /// A command from the command line, and where its reply goes.
+    Command(crate::command::Command, Sender<crate::command::Reply>),
+}
+
+/// How long the socket waits for the window to answer a command. The window polls
+/// every few milliseconds, so this is only reached when it is stuck.
+const REPLY_WAIT: Duration = Duration::from_secs(2);
+
+/// How long the command line waits for the reply, a little past `REPLY_WAIT`.
+const REQUEST_WAIT: Duration = Duration::from_secs(3);
 
 /// True when `command` is a culm hook entry, whichever path the binary sits at.
 #[must_use]
@@ -215,15 +233,23 @@ pub fn socket_path(slug: &str) -> PathBuf {
     }
 }
 
-/// The process boundary for attention markers: one socket per open project.
+/// The process boundary for attention markers and commands: one socket per open
+/// project.
 pub trait HookListener: std::fmt::Debug {
     /// Starts listening for one project. Fails when another culm already listens for
     /// it, because two windows on one project would resume the same sessions.
-    fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>>;
+    fn listen(&self, slug: &str) -> Result<Receiver<Inbound>>;
     /// Stops listening for one project, and removes its socket.
     fn release(&self, slug: &str);
     /// True while a culm window listens for the project.
     fn is_open(&self, slug: &str) -> bool;
+    /// Hands a command to the window that has the project open, and returns its
+    /// reply.
+    fn request(
+        &self,
+        slug: &str,
+        command: &crate::command::Command,
+    ) -> Result<crate::command::Reply>;
 }
 
 /// Listens on the real Unix socket of each project.
@@ -231,7 +257,7 @@ pub trait HookListener: std::fmt::Debug {
 pub struct SocketHookListener;
 
 impl HookListener for SocketHookListener {
-    fn listen(&self, slug: &str) -> Result<Receiver<HookEvent>> {
+    fn listen(&self, slug: &str) -> Result<Receiver<Inbound>> {
         // A socket file that refuses is left over from a crash, and `listen`
         // replaces it.
         if self.is_open(slug) {
@@ -248,13 +274,62 @@ impl HookListener for SocketHookListener {
     fn release(&self, slug: &str) {
         let _ = std::fs::remove_file(socket_path(slug));
     }
+
+    fn request(
+        &self,
+        slug: &str,
+        command: &crate::command::Command,
+    ) -> Result<crate::command::Reply> {
+        request(&socket_path(slug), command)
+    }
 }
 
-/// Binds the socket and returns the channel that carries hook payloads.
+/// The envelope that tells a command from a hook payload. A hook payload never
+/// carries this key.
+const COMMAND_KEY: &str = "culm";
+
+/// Sends one command to the socket at `path` and reads the reply.
+pub fn request(path: &Path, command: &crate::command::Command) -> Result<crate::command::Reply> {
+    let mut stream =
+        UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
+    stream.set_write_timeout(Some(REQUEST_WAIT))?;
+    stream.set_read_timeout(Some(REQUEST_WAIT))?;
+    let payload = json!({ COMMAND_KEY: command });
+    stream.write_all(payload.to_string().as_bytes())?;
+    // The window reads to the end of the message, so the write half closes first.
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut answer = String::new();
+    stream
+        .read_to_string(&mut answer)
+        .context("the window did not answer")?;
+    serde_json::from_str(&answer).context("the window answered something unreadable")
+}
+
+/// Reads one message: a command in its envelope, or a hook payload.
+fn parse_inbound(payload: &str) -> Option<ParsedInbound> {
+    let value: Value = serde_json::from_str(payload).ok()?;
+    match value.get(COMMAND_KEY) {
+        Some(command) => serde_json::from_value(command.clone())
+            .ok()
+            .map(ParsedInbound::Command),
+        None => serde_json::from_value(value).ok().map(ParsedInbound::Hook),
+    }
+}
+
+#[derive(Debug)]
+enum ParsedInbound {
+    Hook(HookEvent),
+    Command(crate::command::Command),
+}
+
+/// Binds the socket and returns the channel that carries hook payloads and commands.
 ///
 /// A stale socket file from an earlier run is removed first, because a crash leaves
 /// the file behind and `bind` refuses an existing path.
-pub fn listen(path: &Path) -> Result<Receiver<HookEvent>> {
+///
+/// A command waits for the window's reply on a thread of its own, so hooks keep
+/// flowing while the window answers.
+pub fn listen(path: &Path) -> Result<Receiver<Inbound>> {
     if path.exists() {
         let _ = std::fs::remove_file(path);
     }
@@ -271,13 +346,28 @@ pub fn listen(path: &Path) -> Result<Receiver<HookEvent>> {
             if stream.read_to_string(&mut payload).is_err() {
                 continue;
             }
-            if let Ok(event) = serde_json::from_str::<HookEvent>(&payload) {
-                if let Some(log) = log.as_deref() {
-                    record(log, &event);
+            match parse_inbound(&payload) {
+                Some(ParsedInbound::Hook(event)) => {
+                    if let Some(log) = log.as_deref() {
+                        record(log, &event);
+                    }
+                    if tx.send(Inbound::Hook(event)).is_err() {
+                        break;
+                    }
                 }
-                if tx.send(event).is_err() {
-                    break;
+                Some(ParsedInbound::Command(command)) => {
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    if tx.send(Inbound::Command(command, reply_tx)).is_err() {
+                        break;
+                    }
+                    std::thread::spawn(move || {
+                        let reply = reply_rx.recv_timeout(REPLY_WAIT).unwrap_or_else(|_| {
+                            crate::command::Reply::refused("the window did not answer in time")
+                        });
+                        let _ = stream.write_all(json!(reply).to_string().as_bytes());
+                    });
                 }
+                None => {}
             }
         }
     });
@@ -330,6 +420,43 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_payload_in_the_envelope_is_a_command_and_any_other_is_a_hook() {
+        let command = parse_inbound(r#"{"culm":{"op":"ports"}}"#);
+        assert!(
+            matches!(
+                command,
+                Some(ParsedInbound::Command(crate::command::Command::Ports))
+            ),
+            "{command:?}"
+        );
+        let hook = parse_inbound(r#"{"session_id":"s1","hook_event_name":"Stop"}"#);
+        assert!(
+            matches!(&hook, Some(ParsedInbound::Hook(e)) if e.hook_event_name == "Stop"),
+            "{hook:?}"
+        );
+        assert!(parse_inbound(r#"{"culm":{"op":"no-such-op"}}"#).is_none());
+    }
+
+    #[test]
+    fn a_command_on_the_socket_gets_the_window_reply_back() {
+        let path = std::env::temp_dir().join(format!("culm-{}-request.sock", std::process::id()));
+        let rx = listen(&path).expect("the socket binds in the temporary directory");
+        let window = std::thread::spawn(move || match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Inbound::Command(command, reply)) => {
+                assert_eq!(command, crate::command::Command::Ports);
+                reply
+                    .send(crate::command::Reply::refused("answered"))
+                    .expect("the socket waits for the reply");
+            }
+            other => panic!("expected a command, got {other:?}"),
+        });
+        let reply = request(&path, &crate::command::Command::Ports).expect("a reply comes back");
+        window.join().expect("the window thread ends");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(reply, crate::command::Reply::refused("answered"));
+    }
 
     fn event(name: &str) -> HookEvent {
         HookEvent {

@@ -10,12 +10,10 @@ use ratatui::layout::{Position, Rect};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::git::Git;
-use crate::gitview::{GitKey, GitSplit, GitView, Owner};
+use crate::gitview::{GitKey, GitSplit, GitView, Owner, RepoTab};
 use crate::hooks::{Attention, HookEvent};
 use crate::keys::{HostAction, host_action};
-use crate::project::{
-    Project, SessionRecord, SessionRepo, SessionState, slugify, system_prompt, unique_slug,
-};
+use crate::project::{Project, SessionRecord, SessionState, slugify, system_prompt, unique_slug};
 use crate::pty::{PtySpawner, SessionSpec};
 use crate::recap::{RECAP_UNAVAILABLE, RecapJob, Recapper};
 use crate::session::Session;
@@ -161,20 +159,13 @@ enum SidebarRow {
     Session(String),
 }
 
-/// Which field of the new-session form holds the cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Field {
-    #[default]
-    Name,
-    Repos,
-}
-
 /// The new-session form. While a form is open, no key reaches a child.
+///
+/// It asks for a name only. A session starts at the project root, and registers its
+/// worktrees later, when Claude Code has made them.
 #[derive(Debug, Clone, Default)]
 pub struct NewSession {
     pub name: String,
-    pub chosen: Vec<bool>,
-    pub field: Field,
 }
 
 /// Which button of a confirmation holds the cursor.
@@ -506,18 +497,25 @@ impl App {
         // The session reaches every repository of the project, not only its worktree.
         args.push("--add-dir".into());
         args.push(self.project.root.display().to_string());
-        if !record.repos.is_empty() {
+        let prompt = system_prompt(record);
+        if !prompt.is_empty() {
             args.push("--append-system-prompt".into());
-            args.push(system_prompt(&record.repos));
+            args.push(prompt);
         }
+        // `culm session` reads the last two, so a command run inside the session
+        // needs no flag to name it.
         SessionSpec::new(&record.name, "claude", &record.cwd)
             .with_args(args)
-            .with_env([(
-                "CULM_SOCKET",
-                crate::hooks::socket_path(&self.project.slug)
-                    .display()
-                    .to_string(),
-            )])
+            .with_env([
+                (
+                    "CULM_SOCKET",
+                    crate::hooks::socket_path(&self.project.slug)
+                        .display()
+                        .to_string(),
+                ),
+                (crate::cli::SESSION_VAR, record.id.clone()),
+                (crate::cli::PROJECT_VAR, self.project.slug.clone()),
+            ])
             .with_size(self.rows, self.cols)
     }
 
@@ -1126,9 +1124,7 @@ impl App {
     pub fn on_paste(&mut self, text: &str, deps: &Deps<'_>) -> Result<()> {
         match self.modal.as_mut() {
             Some(Modal::NewSession(form)) => {
-                if form.field == Field::Name {
-                    form.name.push_str(text);
-                }
+                form.name.push_str(text);
                 return Ok(());
             }
             // The confirmation, the help and the settings take no text.
@@ -1396,11 +1392,7 @@ impl App {
         }
         self.clear_status();
         self.selection = None;
-        self.modal = Some(Modal::NewSession(NewSession {
-            name: String::new(),
-            chosen: vec![false; self.project.repos.len()],
-            field: Field::Name,
-        }));
+        self.modal = Some(Modal::NewSession(NewSession::default()));
     }
 
     /// Opens the delete confirmation. Offered only for a paused session, which is how
@@ -1626,34 +1618,21 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => self.modal = None,
-            KeyCode::Tab | KeyCode::BackTab => {
-                form.field = match form.field {
-                    Field::Name => Field::Repos,
-                    Field::Repos => Field::Name,
-                };
-            }
             KeyCode::Enter => {
                 let form = form.clone();
                 self.modal = None;
                 self.create_session(&form, deps)?;
             }
-            KeyCode::Backspace if form.field == Field::Name => {
+            KeyCode::Backspace => {
                 form.name.pop();
             }
-            KeyCode::Char(c @ '1'..='9') if form.field == Field::Repos => {
-                let i = c as usize - '1' as usize;
-                if let Some(slot) = form.chosen.get_mut(i) {
-                    *slot = !*slot;
-                }
-            }
-            KeyCode::Char(c) if form.field == Field::Name => form.name.push(c),
+            KeyCode::Char(c) => form.name.push(c),
             _ => {}
         }
         Ok(())
     }
 
-    /// Creates the worktrees, then the session. A git failure stops before the spawn,
-    /// so a half-made session never reaches the list.
+    /// Creates a session at the project root and starts it.
     pub fn create_session(&mut self, form: &NewSession, deps: &Deps<'_>) -> Result<()> {
         if self.active_count() >= MAX_ACTIVE {
             self.status_text =
@@ -1670,37 +1649,15 @@ impl App {
             &slugify(name),
             &taken.iter().map(String::as_str).collect::<Vec<_>>(),
         );
-
-        let mut repos = Vec::new();
-        for (i, chosen) in form.chosen.iter().enumerate() {
-            if !chosen {
-                continue;
-            }
-            let Some(repo) = self.project.repos.get(i) else {
-                continue;
-            };
-            let worktree = self.project.worktree_dir(&repo.name, &slug);
-            if let Err(e) = deps.git.worktree_add(&repo.path, &worktree, &slug) {
-                self.status_text = format!("git worktree failed for {}: {e}", repo.name);
-                return Ok(());
-            }
-            repos.push(SessionRepo {
-                name: repo.name.clone(),
-                worktree,
-                branch: slug.clone(),
-            });
-        }
-
-        let cwd = repos
-            .first()
-            .map_or_else(|| self.project.root.clone(), |r| r.worktree.clone());
         let mut record = SessionRecord {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             slug,
             state: SessionState::Active,
-            cwd,
-            repos,
+            cwd: self.project.root.clone(),
+            repos: Vec::new(),
+            ticket: None,
+            port: None,
             started: false,
             last_active: deps.clock.now_secs(),
             last_input: 0,
@@ -2188,6 +2145,21 @@ impl App {
         }
     }
 
+    /// Applies a command from the command line to this project's sessions. The tick
+    /// writes a change, as it writes every other change to a record.
+    pub fn command(&mut self, command: &crate::command::Command) -> crate::command::Reply {
+        let mut records: Vec<&mut SessionRecord> =
+            self.entries.iter_mut().map(|e| &mut e.record).collect();
+        let reply = crate::command::apply(&mut records, command);
+        if reply.changed {
+            self.dirty = true;
+            // A registered worktree is a tab of the changes panel, so the panel
+            // works its tabs out again.
+            self.git.mark_stale();
+        }
+        reply
+    }
+
     /// Ends every child and saves. Active sessions stay active, so the next open
     /// resumes them.
     /// Answers `Ctrl+q`. The first press starts the close, a second cuts it short.
@@ -2550,16 +2522,22 @@ impl App {
 
     /// The repositories the changes panel shows, each with its tab label.
     ///
-    /// For a session: the worktrees culm made for it, then every repository the
+    /// For a session: the worktrees it registered, then every repository the
     /// session wrote a file in, read from its transcript. No layout rule is needed,
     /// so a project that keeps worktrees anywhere, or none, works the same. For the
     /// shell: the repositories registered with the project.
-    fn panel_repositories(&mut self, deps: &Deps<'_>) -> Vec<(String, std::path::PathBuf)> {
-        // A worktree culm made carries the repository's name. Any other tab is named
-        // by its directory.
+    ///
+    /// A session that registered a worktree says where its own work is. Any other
+    /// repository it wrote in, such as a docs repository every session writes to,
+    /// is shared, and lists only the files this session wrote.
+    fn panel_repositories(&mut self, deps: &Deps<'_>) -> Vec<RepoTab> {
+        // A registered worktree carries the repository's name. Any other tab is
+        // named by its directory.
         let mut paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
+        let mut own: Vec<Option<Vec<String>>> = Vec::new();
         match self.visible() {
             Some(entry) => {
+                let registered = entry.record.repos.len();
                 paths.extend(
                     entry
                         .record
@@ -2567,6 +2545,7 @@ impl App {
                         .iter()
                         .map(|r| (Some(r.name.clone()), r.worktree.clone())),
                 );
+                own.resize(registered, None);
                 let dir = crate::project::transcript_dir_name(&entry.record.cwd);
                 let files = deps
                     .store
@@ -2574,9 +2553,18 @@ impl App {
                     .map(|text| crate::transcript::edited_files(&text))
                     .unwrap_or_default();
                 for top in self.git.repositories_of(&files, deps.git) {
-                    if !paths.iter().any(|(_, p)| *p == top) {
-                        paths.push((None, top));
+                    if paths.iter().any(|(_, p)| *p == top) {
+                        continue;
                     }
+                    let mine = (registered > 0).then(|| {
+                        files
+                            .iter()
+                            .filter_map(|f| f.strip_prefix(&top).ok())
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .collect()
+                    });
+                    paths.push((None, top));
+                    own.push(mine);
                 }
             }
             None => paths.extend(
@@ -2586,7 +2574,24 @@ impl App {
                     .map(|r| (Some(r.name.clone()), r.path.clone())),
             ),
         }
+        own.resize(paths.len(), None);
         label_repositories(&paths, &self.project.root)
+            .into_iter()
+            .zip(own)
+            .map(|((label, path), own)| RepoTab { label, path, own })
+            .collect()
+    }
+
+    /// The ticket and port number of the visible session, for the panel title.
+    fn panel_caption(&self) -> Option<String> {
+        let record = &self.visible()?.record;
+        let parts: Vec<String> = record
+            .ticket
+            .iter()
+            .cloned()
+            .chain(record.port.map(|p| format!("port {p}")))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     fn git_key(&mut self, key: &KeyEvent, deps: &Deps<'_>) {
@@ -2615,6 +2620,7 @@ impl App {
             None => Owner::Shell,
         };
         self.git.follow(owner);
+        self.git.caption = self.panel_caption();
         if self.git.wants_read() {
             let repos = self.panel_repositories(deps);
             self.git.set_repos(repos);

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use culm::app::{App, Deps, Field, Focus, NewSession, Pane};
+use culm::app::{App, Deps, Focus, NewSession, Pane};
 use culm::hooks::{Attention, HookEvent};
 use culm::project::{Project, Repository, SessionRecord, SessionState};
 use culm::pty::SessionSpec;
@@ -37,11 +37,20 @@ fn project() -> Project {
     project
 }
 
-fn form(name: &str, chosen: [bool; 2]) -> NewSession {
-    NewSession {
-        name: name.into(),
-        chosen: chosen.to_vec(),
-        field: Field::Name,
+fn form(name: &str) -> NewSession {
+    NewSession { name: name.into() }
+}
+
+/// The command that registers `path` as a worktree of `session`, as
+/// `culm session worktree add` sends it.
+fn register(session: &str, repo: &str, path: &str, branch: &str) -> culm::command::Command {
+    culm::command::Command::WorktreeAdd {
+        session: session.into(),
+        worktree: culm::project::SessionRepo {
+            name: repo.into(),
+            worktree: PathBuf::from(path),
+            branch: branch.into(),
+        },
     }
 }
 
@@ -53,6 +62,8 @@ fn record(name: &str, state: SessionState) -> SessionRecord {
         state,
         cwd: PathBuf::from(ROOT),
         repos: Vec::new(),
+        ticket: None,
+        port: None,
         started: true,
         last_active: 0,
         last_input: 0,
@@ -119,7 +130,7 @@ impl Fakes {
 fn session_output_reaches_the_screen() {
     let f = Fakes::with_output(b"hello from the session");
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
 
     let session = app.entries()[0].live.as_ref().expect("session is live");
@@ -127,63 +138,111 @@ fn session_output_reaches_the_screen() {
 }
 
 #[test]
-fn a_new_session_gets_a_worktree_per_chosen_repo_and_a_shared_branch() {
+fn a_new_session_starts_at_the_root_with_its_id_and_project_in_the_environment() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("feat A", [true, true]), &f.deps())
+    app.create_session(&form("feat A"), &f.deps())
         .expect("session starts");
 
-    let calls = f.git.calls();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(
-        calls[0].path,
-        PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")
-    );
-    assert_eq!(
-        calls[1].path,
-        PathBuf::from("/home/x/spm/.worktrees/crm-mate-feat-a"),
-        "a repository outside the root still lands under .worktrees"
-    );
-    assert!(
-        calls.iter().all(|c| c.branch == "feat-a"),
-        "one branch name is shared across every repository of the session"
-    );
-}
-
-#[test]
-fn a_new_session_starts_with_a_generated_session_id_in_its_first_worktree() {
-    let f = Fakes::new();
-    let mut app = App::new(project());
-    app.create_session(&form("feat A", [true, false]), &f.deps())
-        .expect("session starts");
-
-    let id = app.entries()[0].record.id.clone();
-    assert!(!id.is_empty());
+    let record = &app.entries()[0].record;
+    assert!(!record.id.is_empty());
+    assert!(record.repos.is_empty(), "culm creates no worktree");
     let spec = &f.spawner.specs()[0];
-    assert!(spec.has_flag("--session-id", &id));
+    assert!(spec.has_flag("--session-id", &record.id));
     assert!(spec.has_flag("--add-dir", ROOT));
     assert!(!spec.args.contains(&"--resume".to_string()));
-    assert_eq!(
-        spec.cwd,
-        PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")
+    assert_eq!(spec.cwd, PathBuf::from(ROOT));
+    assert!(
+        spec.env
+            .iter()
+            .any(|(k, v)| k == culm::cli::SESSION_VAR && *v == record.id),
+        "a command run inside the session knows which session it is"
     );
     assert!(
-        spec.args.iter().any(|a| a.contains("api-mate-feat-a")),
-        "the system prompt names the worktree"
+        spec.env
+            .iter()
+            .any(|(k, v)| k == culm::cli::PROJECT_VAR && v == "spm"),
+        "and which project"
     );
 }
 
 #[test]
-fn a_session_with_no_repository_runs_at_the_project_root() {
+fn a_session_that_registered_nothing_gets_no_system_prompt() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("ask", [false, false]), &f.deps())
+    app.create_session(&form("ask"), &f.deps())
         .expect("session starts");
 
     let spec = &f.spawner.specs()[0];
-    assert_eq!(spec.cwd, PathBuf::from(ROOT));
-    assert!(f.git.calls().is_empty());
     assert!(!spec.args.contains(&"--append-system-prompt".to_string()));
+}
+
+#[test]
+fn a_resumed_session_is_told_its_ticket_port_and_worktrees() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("feat A"), &f.deps())
+        .expect("session starts");
+    let id = app.entries()[0].record.id.clone();
+    let worktree = "/home/x/spm/.worktrees/CLUB-1138/api-mate";
+    for command in [
+        register(&id, "api-mate", worktree, "feature/CLUB-1138-x"),
+        culm::command::Command::Ticket {
+            session: id.clone(),
+            ticket: Some("CLUB-1138".into()),
+        },
+        culm::command::Command::Port {
+            session: id.clone(),
+            port: Some(7),
+        },
+    ] {
+        assert!(app.command(&command).ok);
+    }
+    app.toggle_pause(&f.deps()).expect("pause succeeds");
+    app.toggle_pause(&f.deps()).expect("resume succeeds");
+
+    let spec = f
+        .spawner
+        .specs()
+        .last()
+        .cloned()
+        .expect("the resume spawned");
+    assert!(spec.has_flag("--resume", &id));
+    let at = spec
+        .args
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .expect("the resume carries a system prompt");
+    let prompt = &spec.args[at + 1];
+    assert!(prompt.contains("CLUB-1138"), "{prompt}");
+    assert!(prompt.contains("port number: 7"), "{prompt}");
+    assert!(prompt.contains(worktree), "{prompt}");
+}
+
+#[test]
+fn a_command_to_the_open_project_changes_the_record_and_is_saved_on_the_tick() {
+    let f = Fakes::new();
+    let mut app = App::open(project(), &f.deps(), 20, 60);
+    app.create_session(&form("feat A"), &f.deps())
+        .expect("session starts");
+    let id = app.entries()[0].record.id.clone();
+
+    let reply = app.command(&culm::command::Command::Port {
+        session: "feat-a".into(),
+        port: Some(3),
+    });
+    assert!(reply.ok && reply.changed, "{}", reply.text);
+    assert_eq!(app.entries()[0].record.port, Some(3));
+
+    app.on_tick(&FakeMemoryProbe::new(0), &f.deps())
+        .expect("tick succeeds");
+    let saved = f.store.project("spm").expect("the project was saved");
+    let record = saved
+        .sessions
+        .iter()
+        .find(|r| r.id == id)
+        .expect("the session is saved");
+    assert_eq!(record.port, Some(3));
 }
 
 #[test]
@@ -242,9 +301,9 @@ fn a_session_that_fails_to_start_leaves_the_rest_running() {
 fn pause_sends_sigterm_and_moves_the_session_to_the_paused_half() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     let child = f.spawner.spawn_named("one").expect("one was spawned").child;
 
@@ -271,7 +330,7 @@ fn pause_sends_sigterm_and_moves_the_session_to_the_paused_half() {
 fn resume_restarts_a_paused_session_with_its_transcript() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
 
@@ -289,7 +348,7 @@ fn a_child_that_exits_becomes_paused_on_the_next_tick() {
     let f = Fakes::new();
     let probe = FakeMemoryProbe::new(0);
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     f.spawner
         .last_child()
@@ -308,7 +367,7 @@ fn memory_is_sampled_for_every_running_session() {
     let f = Fakes::new();
     let probe = FakeMemoryProbe::new(436 * 1024 * 1024);
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     app.on_tick(&probe, &f.deps()).expect("tick succeeds");
@@ -321,12 +380,12 @@ fn a_ninth_active_session_is_refused() {
     let f = Fakes::new();
     let mut app = App::new(project());
     for n in 1..=8 {
-        app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
+        app.create_session(&form(&format!("s{n}")), &f.deps())
             .expect("session starts");
     }
     assert_eq!(app.active_count(), 8);
 
-    app.create_session(&form("s9", [false, false]), &f.deps())
+    app.create_session(&form("s9"), &f.deps())
         .expect("the call succeeds and refuses the session");
 
     assert_eq!(app.active_count(), 8);
@@ -335,33 +394,12 @@ fn a_ninth_active_session_is_refused() {
 }
 
 #[test]
-fn a_git_failure_aborts_before_the_spawn() {
-    let f = Fakes::new();
-    f.git.fail_from_now_on();
-    let mut app = App::new(project());
-
-    app.create_session(&form("feat A", [true, false]), &f.deps())
-        .expect("the call succeeds and reports the failure");
-
-    assert_eq!(
-        f.spawner.count(),
-        0,
-        "no process starts without its worktree"
-    );
-    assert!(
-        app.entries().is_empty(),
-        "no half-made session reaches the list"
-    );
-    assert!(app.status().contains("worktree"));
-}
-
-#[test]
 fn hook_events_mark_the_matching_session_only() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     let id = app.entries()[0].record.id.clone();
 
@@ -384,9 +422,9 @@ fn hook_events_mark_the_matching_session_only() {
 fn focusing_a_session_never_clears_its_marker() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     let id = app.entries()[0].record.id.clone();
     app.on_hook(&HookEvent {
@@ -406,7 +444,7 @@ fn focusing_a_session_never_clears_its_marker() {
 fn answering_a_permission_prompt_clears_the_marker() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
     app.on_hook(&HookEvent {
@@ -436,9 +474,9 @@ fn answering_a_permission_prompt_clears_the_marker() {
 fn a_key_sent_to_one_session_leaves_another_session_marked() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     for i in 0..2 {
         let id = app.entries()[i].record.id.clone();
@@ -461,7 +499,7 @@ fn a_key_sent_to_one_session_leaves_another_session_marked() {
 fn a_paste_also_answers_a_permission_prompt() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
     app.on_hook(&HookEvent {
@@ -480,7 +518,7 @@ fn a_paste_also_answers_a_permission_prompt() {
 fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
     app.on_hook(&HookEvent {
@@ -510,7 +548,7 @@ fn a_keystroke_leaves_a_done_marker_for_the_hook_to_clear() {
 fn a_late_tool_event_never_clears_a_done_marker() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
     let hook = |name: &str| HookEvent {
@@ -540,9 +578,9 @@ fn a_late_tool_event_never_clears_a_done_marker() {
 fn keys_reach_the_visible_session_only() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     app.set_focus(0);
 
@@ -560,7 +598,7 @@ fn home_and_end_reach_a_shell_line_editor_in_its_own_mode() {
     // zsh sends terminfo smkx before it reads a line, then binds the SS3 forms.
     let f = Fakes::with_output(b"\x1b[?1h\x1b=prompt");
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let session = app.entries()[0].live.as_ref().expect("session is live");
     assert!(session.wait_for_text("prompt", Duration::from_secs(1)));
@@ -578,7 +616,7 @@ fn home_and_end_reach_a_shell_line_editor_in_its_own_mode() {
 fn paste_reaches_the_focused_session_bracketed() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     app.on_paste("first\nsecond\nthird", &f.deps())
@@ -596,7 +634,7 @@ fn paste_reaches_the_focused_session_bracketed() {
 fn keys_go_to_the_form_and_never_to_the_child_while_it_is_open() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let pty = f.spawner.last_pty().expect("a pty exists");
 
@@ -612,20 +650,21 @@ fn keys_go_to_the_form_and_never_to_the_child_while_it_is_open() {
 }
 
 #[test]
-fn the_form_toggles_a_repository_with_a_digit() {
+fn a_digit_in_the_form_is_part_of_the_name() {
     let f = Fakes::new();
     let mut app = App::new(project());
 
     app.on_key(&key(KeyCode::Char('N'), KeyModifiers::ALT), &f.deps())
         .expect("the form opens");
-    app.on_key(&key(KeyCode::Tab, KeyModifiers::NONE), &f.deps())
-        .expect("the field switches");
-    app.on_key(&key(KeyCode::Char('2'), KeyModifiers::NONE), &f.deps())
-        .expect("the repository toggles");
+    for c in "club-1138".chars() {
+        app.on_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &f.deps())
+            .expect("the form takes the key");
+    }
 
     assert_eq!(
-        app.new_session_form().map(|m| m.chosen.clone()),
-        Some(vec![false, true])
+        app.new_session_form().map(|m| m.name.as_str()),
+        Some("club-1138"),
+        "the form asks for a name only"
     );
 }
 
@@ -633,9 +672,9 @@ fn the_form_toggles_a_repository_with_a_digit() {
 fn a_click_on_a_sidebar_row_switches_the_visible_session() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     let hit = HitBox {
         sidebar_width: 30,
@@ -830,9 +869,9 @@ fn dragging_the_separator_resizes_the_sidebar_within_its_limits() {
 fn a_click_inside_the_panel_never_changes_the_focus() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     app.set_focus(1);
     let hit = HitBox {
@@ -860,9 +899,9 @@ fn a_click_inside_the_panel_never_changes_the_focus() {
 fn every_session_is_resized_not_only_the_visible_one() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
 
     app.resize_all(20, 60).expect("resize succeeds");
@@ -877,7 +916,7 @@ fn state_is_saved_after_every_mutation() {
     let f = Fakes::new();
     let mut app = App::new(project());
 
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let after_create = f.store.saves();
     assert!(after_create >= 1);
@@ -894,9 +933,9 @@ fn state_is_saved_after_every_mutation() {
 /// Two sessions, both running, ready to be closed.
 fn two_sessions(f: &Fakes) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     app
 }
@@ -913,7 +952,7 @@ fn session_with_transcript(f: &Fakes) -> App {
         recap_on_pause: true,
         ..culm::config::Config::default()
     });
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let id = app.entries()[0].record.id.clone();
     f.store.put_transcript(
@@ -964,7 +1003,7 @@ fn space_flips_the_switch_and_writes_it_at_once() {
 fn no_key_reaches_a_child_while_the_settings_are_open() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
     app.on_key(&key(KeyCode::Char('S'), KeyModifiers::ALT), &f.deps())
@@ -981,7 +1020,7 @@ fn no_key_reaches_a_child_while_the_settings_are_open() {
 fn pausing_takes_no_recap_while_the_setting_is_off() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     f.store.put_transcript(
         &culm::project::transcript_dir_name(Path::new(ROOT)),
@@ -1038,7 +1077,7 @@ fn a_session_with_no_transcript_is_left_alone() {
         recap_on_pause: true,
         ..culm::config::Config::default()
     });
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     app.toggle_pause(&f.deps()).expect("one pauses");
@@ -1280,9 +1319,9 @@ fn an_ordinary_open_reports_nothing() {
 fn quitting_leaves_active_sessions_active_so_the_next_open_resumes_them() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     app.set_focus(1);
     app.toggle_pause(&f.deps()).expect("two pauses");
@@ -1357,7 +1396,7 @@ fn the_shell_does_not_count_toward_the_eight_session_limit() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
     for n in 1..=8 {
-        app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
+        app.create_session(&form(&format!("s{n}")), &f.deps())
             .expect("session starts");
     }
 
@@ -1399,7 +1438,7 @@ fn a_shell_that_exits_is_restarted_on_the_next_tick() {
 fn pause_does_nothing_while_the_shell_is_focused() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.focus_shell();
 
@@ -1413,7 +1452,7 @@ fn pause_does_nothing_while_the_shell_is_focused() {
 fn keys_reach_the_shell_when_it_is_focused() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let session = f.spawner.spawn_named("one").expect("one spawned");
     app.focus_shell();
@@ -1430,7 +1469,7 @@ fn keys_reach_the_shell_when_it_is_focused() {
 fn the_shell_is_never_saved_to_the_project_file() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     let saved = f.store.project("spm").expect("the project was saved");
@@ -1442,9 +1481,9 @@ fn the_shell_is_never_saved_to_the_project_file() {
 fn focusing_the_shell_keeps_the_place_in_the_session_list() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     app.set_focus(1);
 
@@ -1458,7 +1497,7 @@ fn focusing_the_shell_keeps_the_place_in_the_session_list() {
 fn a_click_on_the_shell_row_focuses_the_shell() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let hit = HitBox {
         sidebar_width: 30,
@@ -1493,7 +1532,7 @@ fn a_click_on_the_shell_row_focuses_the_shell() {
 fn deleting_a_paused_session_removes_its_record_and_transcript() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("feat A", [true, false]), &f.deps())
+    app.create_session(&form("feat A"), &f.deps())
         .expect("one starts");
     let record = app.entries()[0].record.clone();
     app.toggle_pause(&f.deps()).expect("pause succeeds");
@@ -1515,21 +1554,25 @@ fn deleting_a_paused_session_removes_its_record_and_transcript() {
 }
 
 #[test]
-fn delete_leaves_the_worktree_and_the_branch_alone() {
+fn delete_leaves_a_registered_worktree_on_disk_and_says_so() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("feat A", [true, true]), &f.deps())
+    app.create_session(&form("feat A"), &f.deps())
         .expect("one starts");
-    let created = f.git.calls();
+    let id = app.entries()[0].record.id.clone();
+    assert!(
+        app.command(&register(
+            &id,
+            "api-mate",
+            "/home/x/spm/.worktrees/CLUB-1/api-mate",
+            "x"
+        ))
+        .ok
+    );
     app.toggle_pause(&f.deps()).expect("pause succeeds");
 
     app.delete_session(0, &f.deps()).expect("delete succeeds");
 
-    assert_eq!(
-        f.git.calls(),
-        created,
-        "git is not asked to remove anything"
-    );
     assert!(app.status().contains("worktrees are still on disk"));
 }
 
@@ -1537,7 +1580,7 @@ fn delete_leaves_the_worktree_and_the_branch_alone() {
 fn delete_is_refused_while_the_session_runs() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
@@ -1555,7 +1598,7 @@ fn delete_is_refused_while_the_session_runs() {
 /// Opens the confirmation on a paused session named `one`.
 fn confirming_delete(f: &Fakes) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
     app.on_key(&key(KeyCode::Char('X'), KeyModifiers::ALT), &f.deps())
@@ -1687,7 +1730,7 @@ fn a_click_on_yes_deletes_and_a_click_on_no_does_not() {
 fn cancelling_the_confirmation_deletes_nothing() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
 
@@ -1705,7 +1748,7 @@ fn cancelling_the_confirmation_deletes_nothing() {
 fn delete_does_nothing_while_the_shell_is_focused() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
     app.focus_shell();
@@ -1735,6 +1778,7 @@ fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     )
     .expect("rm succeeds");
 
@@ -1745,45 +1789,29 @@ fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
         vec!["-home-x-spm--worktrees-api-mate-feat-a".to_string()],
         "without --recursive only the root transcripts go"
     );
-    assert!(
-        f.git.removed().is_empty(),
-        "no worktree without --recursive"
-    );
 }
 
 #[test]
-fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
+fn rm_recursive_takes_every_transcript_under_the_root_and_leaves_worktrees() {
     let f = Fakes::new();
     let mut registry = culm::project::Registry::default();
     registry.add(ROOT);
     f.store.save_registry(&registry).expect("registry saves");
 
     let mut project = project();
-    project.sessions = vec![SessionRecord {
-        id: "id-1".into(),
-        name: "feat A".into(),
-        slug: "feat-a".into(),
-        state: SessionState::Paused,
-        cwd: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
-        repos: vec![culm::project::SessionRepo {
-            name: "api-mate".into(),
-            worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
-            branch: "feat-a".into(),
-        }],
-        started: true,
-        last_active: 0,
-        last_input: 0,
-        recap: None,
-        recap_at: 0,
-        archived_from: None,
+    let mut session = record("feat-a", SessionState::Paused);
+    session.repos = vec![culm::project::SessionRepo {
+        name: "api-mate".into(),
+        worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+        branch: "feat-a".into(),
     }];
+    project.sessions = vec![session];
     f.store.put_project(&project);
     f.store.put_claude_dirs([
         "-home-x-spm",
         "-home-x-spm--worktrees-api-mate-feat-a",
         "-home-x-other",
     ]);
-    f.git.mark_dirty("/home/x/spm/.worktrees/api-mate-feat-a");
 
     culm::cli::run(
         culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force", "--recursive"]),
@@ -1793,6 +1821,7 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     )
     .expect("rm succeeds");
 
@@ -1800,14 +1829,6 @@ fn rm_recursive_takes_every_transcript_under_the_root_and_the_worktrees() {
         f.store.list_claude_dirs().expect("list"),
         vec!["-home-x-other".to_string()],
         "a project outside the root is untouched"
-    );
-    assert_eq!(
-        f.git.removed(),
-        vec![PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")]
-    );
-    assert!(
-        f.git.calls().is_empty(),
-        "no branch is created or touched during a removal"
     );
 }
 
@@ -1822,6 +1843,7 @@ fn rm_refuses_an_unknown_project() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     );
     assert!(result.is_err());
 }
@@ -1850,7 +1872,7 @@ fn panel_hit() -> HitBox {
 fn scrolled_session(f: &Fakes) -> App {
     let mut app = App::new(project());
     app.resize_all(6, 40).expect("resize succeeds");
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let session = app.entries()[0].live.as_ref().expect("one is live");
     assert!(
@@ -2037,7 +2059,7 @@ fn the_wheel_still_scrolls_culm_when_the_child_wants_no_mouse() {
 fn typing_stamps_the_session_with_the_time_of_the_keystroke() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
 
     f.clock.set(4_242);
@@ -2051,7 +2073,7 @@ fn typing_stamps_the_session_with_the_time_of_the_keystroke() {
 fn a_stamp_from_a_keystroke_reaches_the_store_on_the_next_tick() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
     let saves = f.store.saves();
 
@@ -2071,7 +2093,7 @@ fn a_stamp_from_a_keystroke_reaches_the_store_on_the_next_tick() {
 fn pausing_and_resuming_both_stamp_the_session() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
 
     f.clock.set(100);
@@ -2086,7 +2108,7 @@ fn pausing_and_resuming_both_stamp_the_session() {
 /// One active session named `one`, ready for a rename.
 fn one_session(f: &Fakes) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
     app
 }
@@ -2203,7 +2225,7 @@ fn the_shell_has_no_name_to_rename() {
 /// A session whose screen already holds `settled`, so a drag reads known text.
 fn text_session(f: &Fakes, settled: &str) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
     let session = app.entries()[0].live.as_ref().expect("live");
     assert!(session.wait_for_text(settled, Duration::from_secs(1)));
@@ -2625,7 +2647,7 @@ fn three_paused(f: &Fakes) -> App {
     let mut app = App::new(project());
     for (name, at) in [("alpha", 100), ("beta", 200), ("gamma", 300)] {
         f.clock.set(at);
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("session starts");
         app.toggle_pause(&f.deps()).expect("pause");
     }
@@ -2667,7 +2689,7 @@ fn the_active_list_keeps_the_order_its_sessions_were_created_in() {
     let mut app = App::new(project());
     for (name, at) in [("alpha", 300), ("beta", 200), ("gamma", 100)] {
         f.clock.set(at);
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("session starts");
     }
 
@@ -2767,7 +2789,7 @@ fn enter_focuses_the_first_match_and_keeps_the_filter() {
 fn keys_go_to_the_search_box_and_never_to_the_child() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("session starts");
     let pty = f.spawner.spawn_named("one").expect("one spawned").pty;
 
@@ -2827,6 +2849,7 @@ fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.hooks,
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new(ROOT),
+        &culm::cli::Caller::default(),
     )
 }
 
@@ -3195,9 +3218,9 @@ fn type_text(app: &mut App, f: &Fakes, text: &str) {
 fn archiving_an_active_session_stops_it_and_takes_it_out_of_the_sidebar() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     focus_named(&mut app, "one");
 
@@ -3244,7 +3267,7 @@ fn archiving_takes_no_recap_even_when_the_setting_is_on() {
 fn a_paused_session_can_be_archived_and_leaves_the_paused_list() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("one pauses");
 
@@ -3266,7 +3289,7 @@ fn a_paused_session_can_be_archived_and_leaves_the_paused_list() {
 fn the_shell_cannot_be_archived() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.focus_shell();
 
@@ -3280,7 +3303,7 @@ fn the_shell_cannot_be_archived() {
 fn restoring_puts_an_active_session_back_in_the_active_list_and_resumes_it() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     keep_transcript(&f, &app, "one");
     app.archive_focused(&f.deps()).expect("one is archived");
@@ -3306,7 +3329,7 @@ fn restoring_puts_an_active_session_back_in_the_active_list_and_resumes_it() {
 fn restoring_puts_a_paused_session_back_in_the_paused_list_without_a_process() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     keep_transcript(&f, &app, "one");
     app.toggle_pause(&f.deps()).expect("one pauses");
@@ -3331,7 +3354,7 @@ fn restoring_puts_a_paused_session_back_in_the_paused_list_without_a_process() {
 fn restoring_a_session_whose_transcript_is_gone_removes_it_and_says_why() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.archive_focused(&f.deps()).expect("one is archived");
     let spawned = f.spawner.count();
@@ -3355,12 +3378,12 @@ fn restoring_a_session_whose_transcript_is_gone_removes_it_and_says_why() {
 fn restoring_past_the_active_limit_is_refused_and_keeps_the_session_archived() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("old", [false, false]), &f.deps())
+    app.create_session(&form("old"), &f.deps())
         .expect("old starts");
     keep_transcript(&f, &app, "old");
     app.archive_focused(&f.deps()).expect("old is archived");
     for n in 1..=8 {
-        app.create_session(&form(&format!("s{n}"), [false, false]), &f.deps())
+        app.create_session(&form(&format!("s{n}")), &f.deps())
             .expect("a session starts");
     }
 
@@ -3383,7 +3406,7 @@ fn the_archive_search_reads_only_archived_sessions() {
     let f = Fakes::new();
     let mut app = App::new(project());
     for name in ["alpha", "beta", "alphabet"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("a session starts");
     }
     for name in ["alpha", "beta"] {
@@ -3421,7 +3444,7 @@ fn the_arrows_pick_which_archived_session_is_restored() {
     let f = Fakes::new();
     let mut app = App::new(project());
     for name in ["first", "second"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("a session starts");
         keep_transcript(&f, &app, name);
     }
@@ -3450,7 +3473,7 @@ fn the_arrows_pick_which_archived_session_is_restored() {
 fn no_key_reaches_a_child_while_the_archive_is_open() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     press(&mut app, &f, alt_shift('L'));
@@ -3477,7 +3500,7 @@ fn the_archive_binding_closes_the_list_again() {
 fn an_archived_session_stays_archived_across_a_reopen_and_starts_no_process() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.archive_focused(&f.deps()).expect("one is archived");
     app.shutdown(&f.deps()).expect("the app closes");
@@ -3495,7 +3518,7 @@ fn an_archived_session_stays_archived_across_a_reopen_and_starts_no_process() {
 fn three_sessions(f: &Fakes) -> App {
     let mut app = App::open(project(), &f.deps(), 20, 60);
     for name in ["one", "two", "three"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("a session starts");
     }
     focus_named(&mut app, "one");
@@ -3781,7 +3804,7 @@ fn paused_names(app: &App) -> Vec<String> {
 fn two_lists(f: &Fakes) -> App {
     let mut app = App::open(project(), &f.deps(), 20, 60);
     for name in ["a1", "a2", "a3", "p1", "p2", "p3"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("a session starts");
     }
     for name in ["p1", "p2", "p3"] {
@@ -3897,7 +3920,7 @@ fn inside_a_searched_paused_list_a_move_swaps_with_the_next_match() {
     let f = Fakes::new();
     let mut app = App::open(project(), &f.deps(), 20, 60);
     for name in ["fix-a", "other", "fix-b"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("a session starts");
         focus_named(&mut app, name);
         app.toggle_pause(&f.deps()).expect("the session pauses");
@@ -4028,7 +4051,7 @@ fn a_session_created_while_the_shell_is_on_screen_takes_the_panel() {
     let mut app = App::open(project(), &f.deps(), 20, 60);
     assert_eq!(app.focus(), Focus::Shell);
 
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     assert_eq!(app.visible().map(culm::app::Entry::name), Some("one"));
@@ -4045,7 +4068,7 @@ fn pulse_source(spec: &SessionSpec) -> Option<String> {
 fn a_session_records_from_the_wanted_microphone() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     let spec = f.spawner.specs().pop().expect("a spawn happened");
@@ -4062,7 +4085,7 @@ fn a_session_with_no_wanted_microphone_starts_on_the_default_and_says_so() {
     f.mic
         .set(&["alsa_input.platform-snd_aloop.0.analog-stereo"]);
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts without a microphone");
 
     let spec = f.spawner.specs().pop().expect("a spawn happened");
@@ -4075,7 +4098,7 @@ fn a_session_starts_when_the_sound_server_is_unreachable() {
     let f = Fakes::new();
     f.mic.fail();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts without pactl");
 
     assert_eq!(app.active_count(), 1);
@@ -4089,7 +4112,7 @@ fn a_resume_picks_a_microphone_that_appeared_after_the_first_start() {
     let f = Fakes::new();
     f.mic.set(&[]);
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
 
@@ -4125,7 +4148,7 @@ fn plain_page_up_scrolls_the_history_of_a_session_on_the_main_screen() {
 fn a_full_screen_program_pages_its_own_text() {
     let f = Fakes::with_output(b"\x1b[?1049hfull screen");
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     let session = app.entries()[0].live.as_ref().expect("one is live");
     assert!(session.wait_for_text("full screen", Duration::from_secs(1)));
@@ -4140,7 +4163,7 @@ fn a_full_screen_program_pages_its_own_text() {
 fn ctrl_enter_reaches_a_claude_session_as_its_own_key() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     press(&mut app, &f, key(KeyCode::Enter, KeyModifiers::CONTROL));
@@ -4164,9 +4187,9 @@ fn ctrl_enter_in_the_shell_stays_a_plain_enter() {
 fn an_archived_session_is_deleted_from_the_archive_list_without_a_restore() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     focus_named(&mut app, "one");
     keep_transcript(&f, &app, "one");
@@ -4200,7 +4223,7 @@ fn an_archived_session_is_deleted_from_the_archive_list_without_a_restore() {
 fn escape_on_an_archived_delete_keeps_the_session_and_the_list() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.archive_focused(&f.deps()).expect("one is archived");
 
@@ -4217,7 +4240,7 @@ fn deleting_a_session_above_the_visible_one_keeps_the_visible_one() {
     let f = Fakes::new();
     let mut app = App::new(project());
     for name in ["one", "two", "three"] {
-        app.create_session(&form(name, [false, false]), &f.deps())
+        app.create_session(&form(name), &f.deps())
             .expect("the session starts");
     }
     focus_named(&mut app, "two");
@@ -4241,7 +4264,7 @@ fn ctrl_z() -> KeyEvent {
 fn ctrl_z_never_reaches_a_claude_session_by_default() {
     let f = Fakes::new();
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     press(&mut app, &f, ctrl_z());
@@ -4258,7 +4281,7 @@ fn ctrl_z_reaches_a_claude_session_when_the_setting_is_off() {
         block_ctrl_z: false,
         ..culm::config::Config::default()
     });
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
     press(&mut app, &f, ctrl_z());
@@ -4299,7 +4322,7 @@ const PASTED: &str = "\x1b[200~X\x1b[201~";
 
 fn one_live(f: &Fakes) -> App {
     let mut app = App::new(project());
-    app.create_session(&form("one", [false, false]), &f.deps())
+    app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app
 }
@@ -4428,7 +4451,7 @@ fn a_paste_in_the_shell_never_waits_and_alt_shift_z_leaves_it() {
 fn a_waiting_paste_still_reaches_its_session_after_a_switch() {
     let f = Fakes::new();
     let mut app = one_live(&f);
-    app.create_session(&form("two", [false, false]), &f.deps())
+    app.create_session(&form("two"), &f.deps())
         .expect("two starts");
     focus_named(&mut app, "one");
     type_text(&mut app, &f, "hi");

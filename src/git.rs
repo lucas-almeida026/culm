@@ -1,24 +1,13 @@
-//! The git boundary. culm creates and removes worktrees, and reads a worktree to
-//! show its changes. It never writes to a repository in any other way.
+//! The git boundary. culm only reads: what a session changed, and what a worktree a
+//! session registers is. It never writes to a repository.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Result, bail};
 
 pub trait Git: fmt::Debug {
-    /// Creates a worktree at `path` on a new branch `branch`, taken from the
-    /// repository at `repo`. Does nothing when `path` already exists, so reopening a
-    /// project never fails on a worktree that is already there.
-    fn worktree_add(&self, repo: &Path, path: &Path, branch: &str) -> Result<()>;
-
-    /// True when the worktree holds a change that is not committed.
-    fn worktree_is_dirty(&self, path: &Path) -> Result<bool>;
-
-    /// Removes a worktree directory. Never removes its branch.
-    fn worktree_remove(&self, repo: &Path, path: &Path) -> Result<()>;
-
     /// `git status --porcelain=v2 -z --untracked-files=all`, as git wrote it.
     fn status(&self, worktree: &Path) -> Result<Vec<u8>>;
 
@@ -42,6 +31,41 @@ pub trait Git: fmt::Debug {
     /// when no repository holds it. A path that no longer exists is looked up from
     /// its nearest directory that does.
     fn toplevel(&self, path: &Path) -> Result<Option<std::path::PathBuf>>;
+
+    /// What the checkout that holds `path` is: its top directory, the repository it
+    /// belongs to, its branch, and whether it is a linked worktree. `None` when no
+    /// repository holds `path`.
+    fn worktree_info(&self, path: &Path) -> Result<Option<WorktreeInfo>>;
+}
+
+/// One checkout, as `Git::worktree_info` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub top: PathBuf,
+    /// The directory name of the main checkout, which names the repository for every
+    /// worktree of it.
+    pub repo: String,
+    /// Empty when `HEAD` is detached.
+    pub branch: String,
+    /// True for a worktree made by `git worktree add`, false for a main checkout.
+    pub linked: bool,
+}
+
+/// The repository name for a git common directory: the directory that holds `.git`,
+/// or the bare repository itself without its `.git` suffix.
+#[must_use]
+pub fn repo_name(common_dir: &Path) -> String {
+    let dir = if common_dir.file_name().is_some_and(|n| n == ".git") {
+        common_dir.parent().unwrap_or(common_dir)
+    } else {
+        common_dir
+    };
+    let name = dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    name.strip_suffix(".git")
+        .map_or(name.clone(), str::to_string)
 }
 
 /// The format `log` asks git for. Kept beside the parser's expectations.
@@ -66,55 +90,6 @@ fn read(worktree: &Path, args: &[&str]) -> Result<Vec<u8>> {
 pub struct SystemGit;
 
 impl Git for SystemGit {
-    fn worktree_add(&self, repo: &Path, path: &Path, branch: &str) -> Result<()> {
-        if path.exists() {
-            return Ok(());
-        }
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["worktree", "add", "-b"])
-            .arg(branch)
-            .arg(path)
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            bail!("{}: {}", repo.display(), stderr.trim().replace('\n', " "));
-        }
-        Ok(())
-    }
-
-    fn worktree_is_dirty(&self, path: &Path) -> Result<bool> {
-        if !path.exists() {
-            return Ok(false);
-        }
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(["status", "--porcelain"])
-            .output()?;
-        Ok(!out.stdout.is_empty())
-    }
-
-    fn worktree_remove(&self, repo: &Path, path: &Path) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        // The user already confirmed, and the prompt named every dirty worktree, so
-        // git is told not to refuse. The branch is never touched.
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["worktree", "remove", "--force"])
-            .arg(path)
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            bail!("{}: {}", path.display(), stderr.trim().replace('\n', " "));
-        }
-        Ok(())
-    }
-
     fn status(&self, worktree: &Path) -> Result<Vec<u8>> {
         read(
             worktree,
@@ -175,11 +150,66 @@ impl Git for SystemGit {
         Ok((!top.is_empty()).then(|| std::path::PathBuf::from(top)))
     }
 
+    fn worktree_info(&self, path: &Path) -> Result<Option<WorktreeInfo>> {
+        let Some(dir) = path.ancestors().find(|p| p.is_dir()) else {
+            return Ok(None);
+        };
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+            ])
+            .output()?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut lines = text.lines().map(str::trim);
+        let (Some(top), Some(git_dir), Some(common)) = (lines.next(), lines.next(), lines.next())
+        else {
+            return Ok(None);
+        };
+        let top = PathBuf::from(top);
+        let branch = read(&top, &["branch", "--show-current"])
+            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+            .unwrap_or_default();
+        Ok(Some(WorktreeInfo {
+            repo: repo_name(Path::new(common)),
+            linked: git_dir != common,
+            top,
+            branch,
+        }))
+    }
+
     fn working_file(&self, worktree: &Path, path: &str) -> Result<Option<Vec<u8>>> {
         match std::fs::read(worktree.join(path)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_checkout_is_named_by_the_directory_that_holds_its_git_directory() {
+        assert_eq!(
+            repo_name(Path::new("/home/x/spm/api-mate/.git")),
+            "api-mate",
+            "every worktree of api-mate shares this common directory"
+        );
+    }
+
+    #[test]
+    fn a_bare_repository_is_named_without_its_suffix() {
+        assert_eq!(repo_name(Path::new("/srv/git/api-mate.git")), "api-mate");
     }
 }

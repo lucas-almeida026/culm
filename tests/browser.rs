@@ -5,7 +5,7 @@
 #![allow(clippy::expect_used)]
 
 use clap::Parser;
-use culm::app::{Deps, Field, NewSession};
+use culm::app::{Deps, NewSession};
 use culm::browser::{Browser, MAX_TABS};
 use culm::browser::{BrowserHit, BrowserModal, SaveChoice, WorkspaceOrigin, needs_save_prompt};
 use culm::hooks::{Attention, HookEvent};
@@ -122,14 +122,7 @@ fn focused_slug(b: &Browser) -> String {
 
 fn new_session(b: &mut Browser, f: &Fakes, name: &str) {
     b.app_mut()
-        .create_session(
-            &NewSession {
-                name: name.into(),
-                chosen: Vec::new(),
-                field: Field::Name,
-            },
-            &f.deps(),
-        )
+        .create_session(&NewSession { name: name.into() }, &f.deps())
         .expect("the session starts");
 }
 
@@ -745,6 +738,7 @@ fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.hooks,
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/home/x/a"),
+        &culm::cli::Caller::default(),
     )
 }
 
@@ -1102,4 +1096,385 @@ fn a_reordered_workspace_offers_to_save_the_new_order() {
         f.store.workspaces().find("w").map(|w| w.projects.clone()),
         Some(vec!["b".to_string(), "a".to_string()])
     );
+}
+
+// What a session registers: commands from the command line
+
+/// The command line, run by `caller` from `cwd`.
+fn cli_as(
+    f: &Fakes,
+    args: &[&str],
+    cwd: &str,
+    caller: &culm::cli::Caller,
+) -> anyhow::Result<culm::cli::Outcome> {
+    culm::cli::run(
+        culm::cli::Cli::parse_from(args),
+        &f.store,
+        &f.git,
+        &culm::testing::FakeNamer::default(),
+        &f.hooks,
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new(cwd),
+        caller,
+    )
+}
+
+/// Project `a` with one paused session, `feat`, saved but not open.
+fn closed_project_with_a_session(f: &Fakes) {
+    let mut project = f.project("a");
+    project.sessions.push(culm::project::SessionRecord {
+        id: "id-feat".into(),
+        name: "feat".into(),
+        slug: "feat".into(),
+        state: culm::project::SessionState::Paused,
+        cwd: std::path::PathBuf::from("/home/x/a"),
+        repos: Vec::new(),
+        ticket: None,
+        port: None,
+        started: true,
+        last_active: 0,
+        last_input: 0,
+        recap: None,
+        recap_at: 0,
+        archived_from: None,
+    });
+    f.store.put_project(&project);
+}
+
+fn saved_session(f: &Fakes) -> culm::project::SessionRecord {
+    f.project("a")
+        .sessions
+        .into_iter()
+        .find(|s| s.id == "id-feat")
+        .expect("the session is saved")
+}
+
+#[test]
+fn a_command_on_the_socket_changes_the_open_project_and_replies() {
+    let f = Fakes::new();
+    let mut b = f.open(&["a"]);
+    new_session(&mut b, &f, "feat");
+
+    let reply = f
+        .hooks
+        .send_command(
+            "a",
+            culm::command::Command::Port {
+                session: "feat".into(),
+                port: Some(4),
+            },
+        )
+        .expect("the window listens");
+    b.poll(&f.deps()).expect("a pass of the loop");
+
+    let reply = reply.try_recv().expect("the window answered on its pass");
+    assert!(reply.ok && reply.changed, "{}", reply.text);
+    assert_eq!(b.app().entries()[0].record.port, Some(4));
+}
+
+#[test]
+fn a_command_on_a_closed_project_writes_the_file() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+
+    cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "port",
+            "5",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    )
+    .expect("the command succeeds");
+
+    assert_eq!(saved_session(&f).port, Some(5));
+    assert!(f.hooks.requests().is_empty(), "no window was asked");
+}
+
+#[test]
+fn a_command_on_an_open_project_goes_to_its_window_and_leaves_the_file() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let _b = f.open(&["a"]);
+    f.hooks.answer(culm::command::Reply {
+        ok: true,
+        text: "feat uses port number 5".into(),
+        changed: true,
+    });
+
+    cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "port",
+            "5",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    )
+    .expect("the command succeeds");
+
+    assert_eq!(
+        f.hooks.requests(),
+        vec![(
+            "a".to_string(),
+            culm::command::Command::Port {
+                session: "feat".into(),
+                port: Some(5),
+            }
+        )]
+    );
+    assert_eq!(
+        saved_session(&f).port,
+        None,
+        "the window owns the state, so the command line writes no file"
+    );
+}
+
+#[test]
+fn inside_a_session_the_command_line_needs_no_flag() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let caller = culm::cli::Caller {
+        session: Some("id-feat".into()),
+        project: Some("a".into()),
+    };
+
+    cli_as(
+        &f,
+        &["culm", "session", "ticket", "CLUB-1138"],
+        "/tmp",
+        &caller,
+    )
+    .expect("the session and project come from the caller");
+
+    assert_eq!(saved_session(&f).ticket.as_deref(), Some("CLUB-1138"));
+}
+
+#[test]
+fn outside_a_session_a_session_command_asks_for_the_session() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let result = cli(&f, &["culm", "session", "port", "5", "--project", "a"]);
+    let error = result.expect_err("no session is named").to_string();
+    assert!(error.contains("--session"), "{error}");
+}
+
+#[test]
+fn a_refused_command_fails_the_command_line_and_changes_nothing() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let result = cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "port",
+            "12",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    );
+    assert!(result.is_err(), "a script sees the refusal");
+    assert_eq!(saved_session(&f).port, None);
+}
+
+#[test]
+fn worktree_add_registers_the_top_of_the_checkout_that_holds_the_path() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    f.git.add_worktree(
+        "/home/x/a/.worktrees/CLUB-1/api",
+        "api",
+        "feature/CLUB-1-x",
+        true,
+    );
+
+    cli_as(
+        &f,
+        &[
+            "culm",
+            "session",
+            "worktree",
+            "add",
+            ".worktrees/CLUB-1/api/src",
+            "--session",
+            "feat",
+        ],
+        "/home/x/a",
+        &culm::cli::Caller::default(),
+    )
+    .expect("the worktree registers");
+
+    assert_eq!(
+        saved_session(&f).repos,
+        vec![culm::project::SessionRepo {
+            name: "api".into(),
+            worktree: std::path::PathBuf::from("/home/x/a/.worktrees/CLUB-1/api"),
+            branch: "feature/CLUB-1-x".into(),
+        }]
+    );
+}
+
+#[test]
+fn worktree_add_outside_every_repository_fails() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let result = cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "worktree",
+            "add",
+            "/home/x/a/notes",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    );
+    assert!(result.is_err());
+    assert!(saved_session(&f).repos.is_empty());
+}
+
+#[test]
+fn worktree_rm_forgets_a_worktree_already_gone_from_disk() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let mut project = f.project("a");
+    project.sessions[0].repos.push(culm::project::SessionRepo {
+        name: "api".into(),
+        worktree: std::path::PathBuf::from("/home/x/a/.worktrees/CLUB-1/api"),
+        branch: String::new(),
+    });
+    f.store.put_project(&project);
+
+    cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "worktree",
+            "rm",
+            "/home/x/a/.worktrees/CLUB-1/api",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    )
+    .expect("the worktree is forgotten");
+
+    assert!(saved_session(&f).repos.is_empty());
+}
+
+/// One transcript line, with the directory the session's shell stood in.
+fn line_in(cwd: &str) -> String {
+    serde_json::json!({"type": "user", "cwd": cwd, "message": {"content": "go"}}).to_string()
+}
+
+#[test]
+fn adopt_registers_the_linked_worktrees_a_session_worked_in() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    let worktree = "/home/x/a/.worktrees/CLUB-1/api";
+    f.git
+        .add_worktree(worktree, "api", "feature/CLUB-1-x", true);
+    f.git.add_worktree("/home/x/a/api", "api", "main", false);
+    let text = [
+        line_in("/home/x/a"),
+        line_in("/home/x/a/api"),
+        line_in(worktree),
+        line_in(&format!("{worktree}/src")),
+    ]
+    .join("\n");
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(std::path::Path::new("/home/x/a")),
+        "id-feat",
+        1,
+        &text,
+    );
+
+    let project = f.project("a");
+    let found = culm::cli::adoption(&f.store, &f.git, &project, std::path::Path::new("/tmp"))
+        .expect("the transcripts read");
+    assert_eq!(found.len(), 1);
+    let (record, candidates) = &found[0];
+    assert_eq!(record.id, "id-feat");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| (c.worktree.worktree.display().to_string(), c.evidence))
+            .collect::<Vec<_>>(),
+        vec![(worktree.to_string(), 2)],
+        "a main checkout is shared by every session, so it is no candidate"
+    );
+
+    cli(&f, &["culm", "session", "adopt", "--project", "a", "--yes"]).expect("adopt runs");
+    assert_eq!(saved_session(&f).repos.len(), 1);
+    let again = culm::cli::adoption(
+        &f.store,
+        &f.git,
+        &f.project("a"),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("the transcripts read");
+    assert!(again.is_empty(), "a registered worktree is offered no more");
+}
+
+#[test]
+fn adopt_leaves_out_a_scratch_worktree_in_the_temporary_directory() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    f.git
+        .add_worktree("/tmp/claude/scratch/main-tree", "api", "", true);
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(std::path::Path::new("/home/x/a")),
+        "id-feat",
+        1,
+        &line_in("/tmp/claude/scratch/main-tree"),
+    );
+
+    let found = culm::cli::adoption(
+        &f.store,
+        &f.git,
+        &f.project("a"),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("the transcripts read");
+    assert!(found.is_empty());
+}
+
+#[test]
+fn port_list_names_the_holders_and_the_free_numbers() {
+    let f = Fakes::new();
+    closed_project_with_a_session(&f);
+    cli(
+        &f,
+        &[
+            "culm",
+            "session",
+            "port",
+            "3",
+            "--session",
+            "feat",
+            "--project",
+            "a",
+        ],
+    )
+    .expect("the port is set");
+    // The listing itself is the reply text, which `apply` builds and its own tests
+    // read. Here it is enough that the command runs against the saved project.
+    cli(&f, &["culm", "port", "list", "--project", "a"]).expect("the list prints");
 }

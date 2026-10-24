@@ -66,12 +66,20 @@ pub enum SessionState {
 }
 
 /// One repository that a session edits, and the worktree it edits it through.
+///
+/// The session registers it with `culm session worktree add`. Claude Code creates
+/// the worktree, so culm only records where it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRepo {
     pub name: String,
     pub worktree: PathBuf,
+    /// The branch checked out when the worktree was registered. Empty for a
+    /// detached worktree.
     pub branch: String,
 }
+
+/// The port numbers a session can hold. Ten, so one digit names each.
+pub const PORT_NUMBERS: u8 = 10;
 
 /// Everything culm must remember about a session across a restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +91,13 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub cwd: PathBuf,
     pub repos: Vec<SessionRepo>,
+    /// The ticket the session works on, as the session named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// The port number of the session, from 0 to 9. What a number means is the
+    /// project's convention. Two sessions may hold the same number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u8>,
     /// True once the session started at least once. A later start uses `--resume`.
     #[serde(default)]
     pub started: bool,
@@ -176,12 +191,6 @@ impl Project {
     #[must_use]
     pub fn repo(&self, name: &str) -> Option<&Repository> {
         self.repos.iter().find(|r| r.name == name)
-    }
-
-    /// The directory of the worktree for one repository of one session.
-    #[must_use]
-    pub fn worktree_dir(&self, repo: &str, session_slug: &str) -> PathBuf {
-        worktree_dir(&self.root, repo, session_slug)
     }
 }
 
@@ -297,14 +306,6 @@ pub fn unique_slug(base: &str, taken: &[&str]) -> String {
     base.to_string()
 }
 
-/// Every worktree lives under the project root, prefixed by its repository name, so
-/// that two repositories with the same session slug keep distinct directories.
-#[must_use]
-pub fn worktree_dir(root: &Path, repo: &str, session_slug: &str) -> PathBuf {
-    root.join(".worktrees")
-        .join(format!("{repo}-{session_slug}"))
-}
-
 /// The directory name the Claude Code CLI gives a working directory under
 /// `~/.claude/projects`. Every `/` and every `.` becomes `-`.
 #[must_use]
@@ -331,8 +332,6 @@ pub fn dir_belongs_to(root: &Path, dir_name: &str, recursive: bool) -> bool {
 pub struct Removal {
     /// Directory names under `~/.claude/projects`.
     pub claude_dirs: Vec<String>,
-    /// The repository each worktree belongs to, and the worktree itself.
-    pub worktrees: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Decides what a removal touches. Pure, so the destructive set is testable.
@@ -347,44 +346,42 @@ pub fn plan_removal(project: &Project, claude_dirs: &[String], recursive: bool) 
         .filter(|name| dir_belongs_to(&project.root, name, recursive))
         .cloned()
         .collect();
-
-    let mut worktrees = Vec::new();
-    if recursive {
-        for session in &project.sessions {
-            for repo in &session.repos {
-                if let Some(known) = project.repo(&repo.name) {
-                    worktrees.push((known.path.clone(), repo.worktree.clone()));
-                }
-            }
-        }
-    }
-    Removal {
-        claude_dirs,
-        worktrees,
-    }
+    Removal { claude_dirs }
 }
 
-/// The system prompt addition that maps each repository to its worktree.
+/// What the session registered, handed to it at each start: its ticket, its port
+/// number, and its worktrees. Empty when it registered nothing, so a session in a
+/// project that uses none of this gets no system prompt from culm.
 ///
-/// This is convention only. Nothing enforces it, and a model decides whether to
-/// follow the mapping.
+/// This is information only. A model decides what to do with it.
 #[must_use]
-pub fn system_prompt(repos: &[SessionRepo]) -> String {
-    if repos.is_empty() {
+pub fn system_prompt(record: &SessionRecord) -> String {
+    if record.ticket.is_none() && record.port.is_none() && record.repos.is_empty() {
         return String::new();
     }
-    let mut s = String::from(
-        "culm manages this session. Each repository below is checked out as a git worktree. \
-         Edit files through the worktree path, never through the original checkout.\n",
-    );
-    for r in repos {
+    let mut s = String::from("culm records this about the session:\n");
+    if let Some(ticket) = &record.ticket {
+        s.push_str(&format!("- ticket: {ticket}\n"));
+    }
+    if let Some(port) = record.port {
+        s.push_str(&format!("- port number: {port}\n"));
+    }
+    for r in &record.repos {
+        let branch = if r.branch.is_empty() {
+            "detached".to_string()
+        } else {
+            format!("branch {}", r.branch)
+        };
         s.push_str(&format!(
-            "- {} -> {} (branch {})\n",
+            "- worktree of {}: {} ({branch})\n",
             r.name,
-            r.worktree.display(),
-            r.branch
+            r.worktree.display()
         ));
     }
+    s.push_str(
+        "`culm session show` prints this again. `culm session --help` lists how to \
+         change it.\n",
+    );
     s
 }
 
@@ -409,21 +406,6 @@ mod tests {
         assert_eq!(unique_slug("spm", &[]), "spm");
         assert_eq!(unique_slug("spm", &["spm"]), "spm-2");
         assert_eq!(unique_slug("spm", &["spm", "spm-2"]), "spm-3");
-    }
-
-    #[test]
-    fn worktree_path_prefixes_the_repository_name() {
-        let p = worktree_dir(Path::new("/home/x/spm"), "api-mate", "feat-a");
-        assert_eq!(p, Path::new("/home/x/spm/.worktrees/api-mate-feat-a"));
-    }
-
-    #[test]
-    fn two_repositories_of_one_session_keep_distinct_worktrees() {
-        let root = Path::new("/home/x/spm");
-        assert_ne!(
-            worktree_dir(root, "api-mate", "feat-a"),
-            worktree_dir(root, "crm-mate", "feat-a")
-        );
     }
 
     #[test]
@@ -527,6 +509,8 @@ mod tests {
                 worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
                 branch: "feat-a".into(),
             }],
+            ticket: None,
+            port: None,
             started: true,
             last_active: 0,
             last_input: 0,
@@ -545,7 +529,6 @@ mod tests {
         ];
         let plan = plan_removal(&project_with_a_session(), &dirs, false);
         assert_eq!(plan.claude_dirs, vec!["-home-x-spm".to_string()]);
-        assert!(plan.worktrees.is_empty(), "a worktree needs --recursive");
     }
 
     #[test]
@@ -556,13 +539,6 @@ mod tests {
         ];
         let plan = plan_removal(&project_with_a_session(), &dirs, true);
         assert_eq!(plan.claude_dirs.len(), 2);
-        assert_eq!(
-            plan.worktrees,
-            vec![(
-                PathBuf::from("/home/x/spm/api-mate"),
-                PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a")
-            )]
-        );
     }
 
     #[test]
@@ -574,14 +550,6 @@ mod tests {
             vec!["-home-x-spm".to_string()],
             "spm2 is a different project, not a directory under spm"
         );
-    }
-
-    #[test]
-    fn a_worktree_of_an_unregistered_repository_is_left_alone() {
-        let mut project = project_with_a_session();
-        project.repos.clear();
-        let plan = plan_removal(&project, &[], true);
-        assert!(plan.worktrees.is_empty());
     }
 
     #[test]
@@ -665,19 +633,48 @@ mod tests {
     }
 
     #[test]
-    fn the_system_prompt_names_every_worktree_and_branch() {
-        let repos = vec![SessionRepo {
-            name: "api-mate".into(),
-            worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
-            branch: "feat-a".into(),
-        }];
-        let s = system_prompt(&repos);
-        assert!(s.contains("/home/x/spm/.worktrees/api-mate-feat-a"));
-        assert!(s.contains("branch feat-a"));
+    fn the_system_prompt_names_the_ticket_port_and_worktrees() {
+        let mut record = project_with_a_session().sessions.remove(0);
+        record.ticket = Some("CLUB-1138".into());
+        record.port = Some(7);
+        record.repos.push(SessionRepo {
+            name: "portal-mate".into(),
+            worktree: PathBuf::from("/home/x/spm/.worktrees/CLUB-1138/portal-mate"),
+            branch: String::new(),
+        });
+        let s = system_prompt(&record);
+        assert!(s.contains("ticket: CLUB-1138"), "{s}");
+        assert!(s.contains("port number: 7"), "{s}");
+        assert!(
+            s.contains(
+                "worktree of api-mate: /home/x/spm/.worktrees/api-mate-feat-a (branch feat-a)"
+            ),
+            "{s}"
+        );
+        assert!(s.contains("portal-mate") && s.contains("(detached)"), "{s}");
     }
 
     #[test]
-    fn a_session_with_no_repository_gets_no_system_prompt() {
-        assert_eq!(system_prompt(&[]), "");
+    fn a_session_that_registered_nothing_gets_no_system_prompt() {
+        let mut record = project_with_a_session().sessions.remove(0);
+        record.repos.clear();
+        assert_eq!(system_prompt(&record), "");
+    }
+
+    #[test]
+    fn a_record_written_before_tickets_and_ports_still_reads() {
+        let text = r#"{"id":"a","name":"n","slug":"n","state":"paused","cwd":"/x","repos":[]}"#;
+        let record: SessionRecord = serde_json::from_str(text).expect("an older record loads");
+        assert_eq!(record.ticket, None);
+        assert_eq!(record.port, None);
+    }
+
+    #[test]
+    fn a_session_with_no_ticket_or_port_writes_neither_field() {
+        let text = serde_json::to_string(&project_with_a_session()).expect("serializes");
+        assert!(
+            !text.contains("ticket") && !text.contains("\"port\""),
+            "{text}"
+        );
     }
 }

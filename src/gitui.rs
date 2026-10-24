@@ -32,7 +32,11 @@ const RULE: Color = Color::Rgb(0x50, 0x49, 0x45);
 
 /// Draws the panel into `area` and reports where its parts landed.
 pub fn draw_git(f: &mut Frame, view: &GitView, area: Rect, focused: bool) -> GitHit {
-    let block = pane_block(" changes ", focused);
+    let title = match view.caption.as_deref() {
+        Some(caption) => format!(" changes · {caption} "),
+        None => " changes ".to_string(),
+    };
+    let block = pane_block(title, focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut hit = GitHit {
@@ -48,8 +52,10 @@ pub fn draw_git(f: &mut Frame, view: &GitView, area: Rect, focused: bool) -> Git
             Paragraph::new(if view.follows_shell() {
                 "this project registers no repository. add one with: culm project repo add <path>"
             } else {
-                "this session has not written a file in a git repository yet. a tab appears for \
-                 every repository it writes in, after its turn ends."
+                "this session has registered no worktree and has not written a file in a git \
+                 repository yet. a tab appears for every worktree it registers with culm \
+                 session worktree add, and for every repository it writes in, after its turn \
+                 ends."
             })
             .style(Style::default().fg(DIM))
             .wrap(Wrap { trim: false }),
@@ -102,7 +108,13 @@ pub fn draw_git(f: &mut Frame, view: &GitView, area: Rect, focused: bool) -> Git
         ..body
     };
 
-    let changes_label = format!("Changes ({})", repo.changes.len());
+    // A shared repository says how many changes it left out, so the list never
+    // looks complete when it is not.
+    let changes_label = if repo.hidden > 0 {
+        format!("Changes ({}+{})", repo.changes.len(), repo.hidden)
+    } else {
+        format!("Changes ({})", repo.changes.len())
+    };
     let half = left.width / 2;
     for (i, (label, tab)) in [
         (changes_label.as_str(), GitTab::Changes),
@@ -149,7 +161,11 @@ pub fn draw_git(f: &mut Frame, view: &GitView, area: Rect, focused: bool) -> Git
                     &repo.changes,
                     &repo.files,
                     focused && view.list() == GitList::Files,
-                    "no local changes",
+                    if repo.hidden > 0 {
+                        "no change this session wrote. a shows every change"
+                    } else {
+                        "no local changes"
+                    },
                     lists,
                 );
                 hit.lists

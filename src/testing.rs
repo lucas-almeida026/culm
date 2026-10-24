@@ -16,13 +16,19 @@ type TranscriptKey = (String, String);
 type TranscriptValue = (u64, String);
 
 /// Hands each listened project a channel the test sends on, and records releases.
+///
+/// A request from the command line gets the reply the test set with `answer`, and
+/// is recorded, because a test drives the window and the command line on one
+/// thread and the window cannot answer while the request waits.
 #[derive(Debug, Clone, Default)]
 pub struct FakeHookListener {
     senders: Arc<
-        Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::hooks::HookEvent>>>,
+        Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::hooks::Inbound>>>,
     >,
     elsewhere: Arc<Mutex<Vec<String>>>,
     released: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<(String, crate::command::Command)>>>,
+    answer: Arc<Mutex<Option<crate::command::Reply>>>,
 }
 
 impl FakeHookListener {
@@ -35,7 +41,32 @@ impl FakeHookListener {
     pub fn send(&self, slug: &str, event: crate::hooks::HookEvent) -> bool {
         lock(&self.senders)
             .get(slug)
-            .is_some_and(|tx| tx.send(event).is_ok())
+            .is_some_and(|tx| tx.send(crate::hooks::Inbound::Hook(event)).is_ok())
+    }
+
+    /// Posts one command to the project, as the command line would, and returns
+    /// where the window's reply arrives. `None` when nothing listens.
+    pub fn send_command(
+        &self,
+        slug: &str,
+        command: crate::command::Command,
+    ) -> Option<std::sync::mpsc::Receiver<crate::command::Reply>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sent = lock(&self.senders)
+            .get(slug)
+            .is_some_and(|s| s.send(crate::hooks::Inbound::Command(command, tx)).is_ok());
+        sent.then_some(rx)
+    }
+
+    /// Sets the reply every later request gets.
+    pub fn answer(&self, reply: crate::command::Reply) {
+        *lock(&self.answer) = Some(reply);
+    }
+
+    /// Every request the command line made, with the project it went to.
+    #[must_use]
+    pub fn requests(&self) -> Vec<(String, crate::command::Command)> {
+        lock(&self.requests).clone()
     }
 
     /// Makes the project look open in another culm, so listening for it fails.
@@ -51,7 +82,7 @@ impl FakeHookListener {
 }
 
 impl crate::hooks::HookListener for FakeHookListener {
-    fn listen(&self, slug: &str) -> Result<std::sync::mpsc::Receiver<crate::hooks::HookEvent>> {
+    fn listen(&self, slug: &str) -> Result<std::sync::mpsc::Receiver<crate::hooks::Inbound>> {
         if lock(&self.elsewhere).iter().any(|s| s == slug) {
             return Err(anyhow!("{slug} is open in another culm"));
         }
@@ -67,6 +98,17 @@ impl crate::hooks::HookListener for FakeHookListener {
 
     fn is_open(&self, slug: &str) -> bool {
         lock(&self.senders).contains_key(slug) || lock(&self.elsewhere).iter().any(|s| s == slug)
+    }
+
+    fn request(
+        &self,
+        slug: &str,
+        command: &crate::command::Command,
+    ) -> Result<crate::command::Reply> {
+        lock(&self.requests).push((slug.to_string(), command.clone()));
+        lock(&self.answer)
+            .clone()
+            .ok_or_else(|| anyhow!("{slug}: no window answered"))
     }
 }
 
@@ -405,13 +447,11 @@ impl crate::recap::RecapJob for FakeRecapJob {
     }
 }
 
-/// Records every worktree culm asked for, and fails on demand.
+/// Answers the reads of the changes panel and of a worktree registration from
+/// what the test set.
 #[derive(Debug, Default, Clone)]
 pub struct FakeGit {
-    calls: Arc<Mutex<Vec<WorktreeCall>>>,
-    removed: Arc<Mutex<Vec<std::path::PathBuf>>>,
-    dirty: Arc<Mutex<Vec<std::path::PathBuf>>>,
-    fail: Arc<AtomicBool>,
+    worktrees: Arc<Mutex<Vec<crate::git::WorktreeInfo>>>,
     repos: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, FakeRepo>>>,
     toplevels: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
@@ -428,34 +468,25 @@ struct FakeRepo {
     status_reads: usize,
 }
 
-/// One call to `Git::worktree_add`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeCall {
-    pub repo: std::path::PathBuf,
-    pub path: std::path::PathBuf,
-    pub branch: String,
-}
-
 impl FakeGit {
-    #[must_use]
-    pub fn calls(&self) -> Vec<WorktreeCall> {
-        lock(&self.calls).clone()
-    }
-
-    /// Makes every later worktree fail, so a test covers the abort path.
-    pub fn fail_from_now_on(&self) {
-        self.fail.store(true, Ordering::Relaxed);
-    }
-
-    /// Every worktree culm asked git to remove.
-    #[must_use]
-    pub fn removed(&self) -> Vec<std::path::PathBuf> {
-        lock(&self.removed).clone()
-    }
-
-    /// Reports this worktree as holding an uncommitted change.
-    pub fn mark_dirty(&self, path: impl Into<std::path::PathBuf>) {
-        lock(&self.dirty).push(path.into());
+    /// Makes `top` a checkout of `repo` on `branch`, and the top of a repository
+    /// for `toplevel` as well. An empty branch is a detached worktree. `linked`
+    /// says whether `git worktree add` made it.
+    pub fn add_worktree(
+        &self,
+        top: impl Into<std::path::PathBuf>,
+        repo: &str,
+        branch: &str,
+        linked: bool,
+    ) {
+        let top = top.into();
+        self.add_toplevel(top.clone());
+        lock(&self.worktrees).push(crate::git::WorktreeInfo {
+            top,
+            repo: repo.to_string(),
+            branch: branch.to_string(),
+            linked,
+        });
     }
 
     fn with_repo(&self, worktree: &std::path::Path, f: impl FnOnce(&mut FakeRepo)) {
@@ -511,32 +542,6 @@ impl FakeGit {
 }
 
 impl crate::git::Git for FakeGit {
-    fn worktree_add(
-        &self,
-        repo: &std::path::Path,
-        path: &std::path::Path,
-        branch: &str,
-    ) -> Result<()> {
-        if self.fail.load(Ordering::Relaxed) {
-            return Err(anyhow!("fatal: '{branch}' is already checked out"));
-        }
-        lock(&self.calls).push(WorktreeCall {
-            repo: repo.to_path_buf(),
-            path: path.to_path_buf(),
-            branch: branch.to_string(),
-        });
-        Ok(())
-    }
-
-    fn worktree_is_dirty(&self, path: &std::path::Path) -> Result<bool> {
-        Ok(lock(&self.dirty).iter().any(|p| p == path))
-    }
-
-    fn worktree_remove(&self, _repo: &std::path::Path, path: &std::path::Path) -> Result<()> {
-        lock(&self.removed).push(path.to_path_buf());
-        Ok(())
-    }
-
     fn status(&self, worktree: &std::path::Path) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         self.with_repo(worktree, |r| {
@@ -579,6 +584,14 @@ impl crate::git::Git for FakeGit {
         Ok(lock(&self.repos)
             .get(worktree)
             .and_then(|r| r.files.get(path).cloned()))
+    }
+
+    fn worktree_info(&self, path: &std::path::Path) -> Result<Option<crate::git::WorktreeInfo>> {
+        Ok(lock(&self.worktrees)
+            .iter()
+            .filter(|w| path.starts_with(&w.top))
+            .max_by_key(|w| w.top.components().count())
+            .cloned())
     }
 }
 

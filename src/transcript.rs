@@ -205,6 +205,34 @@ pub fn is_session_file(name: &str) -> bool {
         && stem.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Every working directory the transcript records, with how many lines name it, in
+/// the order each first appears.
+///
+/// Claude Code stamps each line with the directory its shell stood in, so this says
+/// where a session worked even before it wrote a file there. A large transcript is
+/// read with a substring search, because parsing each line would cost most of the
+/// pass.
+#[must_use]
+pub fn visited_dirs(text: &str) -> Vec<(PathBuf, usize)> {
+    const KEY: &str = "\"cwd\":\"";
+    let mut dirs: Vec<(PathBuf, usize)> = Vec::new();
+    for line in text.lines() {
+        let Some(at) = line.find(KEY) else {
+            continue;
+        };
+        let rest = &line[at + KEY.len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let dir = PathBuf::from(&rest[..end]);
+        match dirs.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, count)) => *count += 1,
+            None => dirs.push((dir, 1)),
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +391,23 @@ mod tests {
         assert!(!is_session_file(
             "0b1a26fb-6e43-4d42-b67d-768dc9256d90.json"
         ));
+    }
+
+    #[test]
+    fn visited_dirs_counts_every_line_cwd_in_first_seen_order() {
+        let text = [
+            r#"{"type":"user","cwd":"/home/x/spm","message":{}}"#,
+            r#"{"type":"assistant","cwd":"/home/x/spm/.worktrees/CLUB-1/api","message":{}}"#,
+            r#"{"type":"user","cwd":"/home/x/spm/.worktrees/CLUB-1/api","message":{}}"#,
+            r#"{"type":"summary"}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            visited_dirs(&text),
+            vec![
+                (PathBuf::from("/home/x/spm"), 1),
+                (PathBuf::from("/home/x/spm/.worktrees/CLUB-1/api"), 2),
+            ]
+        );
     }
 }

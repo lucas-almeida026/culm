@@ -8,6 +8,7 @@ pub mod browser;
 pub mod cli;
 pub mod clipboard;
 pub mod clock;
+pub mod command;
 pub mod config;
 pub mod diff;
 pub mod git;

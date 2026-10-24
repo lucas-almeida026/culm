@@ -141,6 +141,21 @@ pub struct RepoView {
     pub commit_file_list: ListCursor,
     /// Why git could not be read, shown in place of the lists.
     pub error: Option<String>,
+    /// The files, relative to the repository top, that the session wrote here.
+    /// `Some` for a repository the session shares with others, whose changes list
+    /// shows only these unless the user asks for every change.
+    pub own: Option<Vec<String>>,
+    /// Changes the last read left out because the session did not write them.
+    pub hidden: usize,
+}
+
+/// One repository tab as the caller works it out: its label, its top, and the
+/// files the session wrote there when the repository is shared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoTab {
+    pub label: String,
+    pub path: PathBuf,
+    pub own: Option<Vec<String>>,
 }
 
 impl RepoView {
@@ -148,6 +163,8 @@ impl RepoView {
         Self {
             name,
             path,
+            own: None,
+            hidden: 0,
             changes: Vec::new(),
             files: ListCursor::default(),
             commits: Vec::new(),
@@ -299,6 +316,11 @@ pub struct GitView {
     /// The repository top of each directory already asked about. `None` means no
     /// repository holds the directory.
     toplevels: std::collections::HashMap<PathBuf, Option<PathBuf>>,
+    /// True when a shared repository lists every change, not only the session's.
+    pub show_all: bool,
+    /// What the panel title adds after "changes": the ticket and the port number of
+    /// the session it follows.
+    pub caption: Option<String>,
 }
 
 impl GitView {
@@ -437,21 +459,23 @@ impl GitView {
 
     /// Sets the repository tabs. A tab already open keeps its picks, and the tab on
     /// screen stays on screen while it is still listed.
-    pub fn set_repos(&mut self, repos: Vec<(String, PathBuf)>) {
+    pub fn set_repos(&mut self, repos: Vec<RepoTab>) {
         let current = self.current().map(|r| r.path.clone());
         let mut old = std::mem::take(&mut self.repos);
         self.repos = repos
             .into_iter()
-            .map(
-                |(name, path)| match old.iter().position(|r| r.path == path) {
+            .map(|tab| {
+                let mut view = match old.iter().position(|r| r.path == tab.path) {
                     Some(at) => {
                         let mut kept = old.swap_remove(at);
-                        kept.name = name;
+                        kept.name = tab.label;
                         kept
                     }
-                    None => RepoView::new(name, path),
-                },
-            )
+                    None => RepoView::new(tab.label, tab.path),
+                };
+                view.own = tab.own;
+                view
+            })
             .collect();
         self.repo = current
             .and_then(|p| self.repos.iter().position(|r| r.path == p))
@@ -499,7 +523,7 @@ impl GitView {
         self.stale = false;
         self.now = now;
         for repo in &mut self.repos {
-            load_repo(repo, git);
+            load_repo(repo, git, self.show_all);
         }
         if self.highlighter.is_none() {
             self.highlighter = Some(Arc::new(Highlighter::new()));
@@ -622,6 +646,10 @@ impl GitView {
             KeyCode::Char(']') => self.switch_repo(self.repo + 1, git),
             // The caller reads on its next pass, after it works out the tabs again.
             KeyCode::Char('r') => self.stale = true,
+            KeyCode::Char('a') => {
+                self.show_all = !self.show_all;
+                self.stale = true;
+            }
             KeyCode::Left | KeyCode::Char('h') if self.tab == GitTab::History => {
                 self.list = Some(GitList::Commits);
             }
@@ -764,13 +792,20 @@ impl GitView {
 }
 
 /// Reads the changes and the history of one repository, keeping each highlight on
-/// the item it was on.
-fn load_repo(repo: &mut RepoView, git: &dyn Git) {
+/// the item it was on. A shared repository lists only the session's own files
+/// unless `show_all` asks for every change.
+fn load_repo(repo: &mut RepoView, git: &dyn Git, show_all: bool) {
     let keep_file = repo.changes.get(repo.files.at).map(|f| f.path.clone());
     let keep_commit = repo.commits.get(repo.commit_list.at).map(|c| c.sha.clone());
+    repo.hidden = 0;
     match git.status(&repo.path) {
         Ok(out) => {
             repo.changes = parse_status(&out);
+            if let (Some(own), false) = (repo.own.as_ref(), show_all) {
+                let before = repo.changes.len();
+                repo.changes.retain(|f| own.contains(&f.path));
+                repo.hidden = before - repo.changes.len();
+            }
             repo.error = None;
         }
         Err(e) => {

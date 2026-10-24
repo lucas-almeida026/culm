@@ -50,6 +50,7 @@ fn main() -> Result<()> {
         &hooks::SocketHookListener,
         &exe,
         &cwd,
+        &cli::Caller::from_env(),
     )? {
         Outcome::Done => Ok(()),
         Outcome::Open(plan) => open(*plan, &store),

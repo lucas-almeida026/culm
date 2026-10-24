@@ -13,7 +13,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::app::{App, Deps};
 use crate::config::Config;
-use crate::hooks::HookEvent;
+use crate::hooks::Inbound;
 use crate::keys::{HostAction, host_action};
 use crate::project::{Project, ProjectEntry};
 use crate::stats::MemoryProbe;
@@ -26,7 +26,7 @@ pub const MAX_TABS: usize = crate::workspace::MAX_PROJECTS;
 #[derive(Debug)]
 pub struct Tab {
     app: App,
-    hooks: Option<Receiver<HookEvent>>,
+    hooks: Option<Receiver<Inbound>>,
 }
 
 impl Tab {
@@ -447,12 +447,19 @@ impl Browser {
         Some(text)
     }
 
-    /// One pass of the loop: hooks, recaps, scroll measurement, and closes.
+    /// One pass of the loop: hooks, commands, recaps, scroll measurement, and closes.
     pub fn poll(&mut self, deps: &Deps<'_>) -> Result<()> {
         for tab in &mut self.tabs {
             if let Some(rx) = tab.hooks.as_ref() {
-                while let Ok(event) = rx.try_recv() {
-                    tab.app.on_hook(&event);
+                while let Ok(inbound) = rx.try_recv() {
+                    match inbound {
+                        Inbound::Hook(event) => tab.app.on_hook(&event),
+                        Inbound::Command(command, reply) => {
+                            // The command line may have given up waiting, and that
+                            // is no reason to stop.
+                            let _ = reply.send(tab.app.command(&command));
+                        }
+                    }
                 }
             }
             tab.app.poll_recap(deps);

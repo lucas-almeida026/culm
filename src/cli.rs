@@ -6,16 +6,46 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
+use crate::command::{Command as SessionCommand, Reply};
 use crate::config::SetError;
 use crate::git::Git;
 use crate::hooks;
 use crate::namer::Namer;
 use crate::project::{
-    Project, ProjectEntry, Registry, Removal, Repository, SessionRecord, SessionState,
+    Project, ProjectEntry, Registry, Removal, Repository, SessionRecord, SessionRepo, SessionState,
     dir_belongs_to, plan_removal, slugify, transcript_dir_name, unique_slug,
 };
 use crate::store::Store;
 use crate::transcript;
+
+/// The environment variable that carries a session's id into its process, so
+/// `culm session` run inside the session knows which session it is.
+pub const SESSION_VAR: &str = "CULM_SESSION";
+/// The environment variable that carries the project slug into a session.
+pub const PROJECT_VAR: &str = "CULM_PROJECT";
+
+/// Who runs the command line: the session and project a culm session hands down
+/// through `SESSION_VAR` and `PROJECT_VAR`. Empty outside a session.
+///
+/// `main` reads the environment. The library never does, so a test that runs inside
+/// a culm session sees the same result as one that does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Caller {
+    pub session: Option<String>,
+    pub project: Option<String>,
+}
+
+impl Caller {
+    /// Reads the caller from the process environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let read = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Self {
+            session: read(SESSION_VAR),
+            project: read(PROJECT_VAR),
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -54,6 +84,14 @@ pub enum Command {
     /// Read or change the settings that apply to every project.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Read or change what a session registered: its ticket, its port number, and
+    /// the worktrees it works through. Inside a culm session, every subcommand acts
+    /// on that session unless --session names another.
+    #[command(subcommand)]
+    Session(SessionCmd),
+    /// See which port numbers the sessions of a project hold.
+    #[command(subcommand)]
+    Port(PortCmd),
     /// Hook client. Reads one payload on stdin and posts it to the interface.
     #[command(hide = true)]
     Hook,
@@ -117,8 +155,7 @@ pub enum ProjectCmd {
         /// Skip the confirmation. Widens nothing.
         #[arg(long)]
         force: bool,
-        /// Also remove the Claude Code data of every path under the root, and every
-        /// worktree the project created.
+        /// Also remove the Claude Code data of every path under the root.
         #[arg(long)]
         recursive: bool,
     },
@@ -163,6 +200,94 @@ pub enum RepoCmd {
     },
 }
 
+/// The session and project a `culm session` command acts on.
+#[derive(Debug, clap::Args)]
+pub struct Target {
+    /// The session, by id, slug, or name. Defaults to the session the command runs
+    /// in.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// The project. Defaults to the project of the session the command runs in, then
+    /// to the project that owns the working directory.
+    #[arg(long)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// List every session that is not archived, with its ticket, port number, and
+    /// worktrees.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Show what one session registered.
+    Show {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Set the ticket the session works on.
+    Ticket {
+        /// The ticket, such as CLUB-1138.
+        #[arg(required_unless_present = "clear")]
+        ticket: Option<String>,
+        /// Remove the ticket.
+        #[arg(long, conflicts_with = "ticket")]
+        clear: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Set the port number of the session, from 0 to 9. Another session may hold the
+    /// same number. See the free ones with: culm port list
+    Port {
+        #[arg(required_unless_present = "clear")]
+        port: Option<u8>,
+        /// Remove the port number.
+        #[arg(long, conflicts_with = "port")]
+        clear: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Register or forget a worktree the session works through.
+    #[command(subcommand)]
+    Worktree(WorktreeCmd),
+    /// Find the worktrees each session worked in, from its transcript, and offer to
+    /// register them.
+    Adopt {
+        #[arg(long)]
+        project: Option<String>,
+        /// Register every worktree found, without asking.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCmd {
+    /// Register a worktree. Any path inside it works. culm only records it, and
+    /// never creates or removes a worktree.
+    Add {
+        path: PathBuf,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Forget a worktree. It stays on disk.
+    Rm {
+        path: PathBuf,
+        #[command(flatten)]
+        target: Target,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PortCmd {
+    /// Each port number from 0 to 9, and the sessions that hold it.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum HooksCmd {
     /// Route the Claude Code hooks to this binary.
@@ -189,6 +314,7 @@ pub enum Outcome {
 }
 
 /// Runs one command. Printing happens here, because a command line is output.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     cli: Cli,
     store: &dyn Store,
@@ -197,6 +323,7 @@ pub fn run(
     hooks: &dyn crate::hooks::HookListener,
     exe: &Path,
     cwd: &Path,
+    caller: &Caller,
 ) -> Result<Outcome> {
     match cli.command {
         None => open(store, namer, &[], cwd, false),
@@ -247,7 +374,7 @@ pub fn run(
             project,
             force,
             recursive,
-        })) => project_rm(store, git, &project, force, recursive),
+        })) => project_rm(store, &project, force, recursive),
         Some(Command::Project(ProjectCmd::Repo(RepoCmd::Add { path, project }))) => {
             repo_add(store, &path, project.as_deref(), cwd)
         }
@@ -256,6 +383,27 @@ pub fn run(
         }
         Some(Command::Project(ProjectCmd::Repo(RepoCmd::List { project }))) => {
             repo_list(store, project.as_deref(), cwd)
+        }
+        Some(Command::Session(cmd)) => {
+            let ctx = SessionCtx {
+                store,
+                git,
+                hooks,
+                cwd,
+                caller,
+            };
+            session_cmd(&ctx, cmd)
+        }
+        Some(Command::Port(PortCmd::List { project })) => {
+            let ctx = SessionCtx {
+                store,
+                git,
+                hooks,
+                cwd,
+                caller,
+            };
+            let slug = ctx.project(project.as_deref())?.slug;
+            print_reply(&deliver(&ctx, &slug, &SessionCommand::Ports)?)
         }
     }
 }
@@ -469,6 +617,8 @@ pub fn import_sessions(
                 state: SessionState::Paused,
                 cwd,
                 repos: Vec::new(),
+                ticket: None,
+                port: None,
                 // The transcript exists, so the session has run and resumes.
                 started: true,
                 last_active: file.modified_secs,
@@ -505,30 +655,17 @@ fn project_list(store: &dyn Store) -> Result<Outcome> {
     Ok(Outcome::Done)
 }
 
-/// Prints what a removal touches, and names every worktree that holds uncommitted
-/// work, so the confirmation is informed.
-fn describe(project: &Project, plan: &Removal, git: &dyn Git) -> Result<()> {
+/// Prints what a removal touches, so the confirmation is informed.
+fn describe(project: &Project, plan: &Removal) {
     println!("removing project {}", project.slug);
     println!("  registry entry and culm state");
     for dir in &plan.claude_dirs {
         println!("  claude data  ~/.claude/projects/{dir}");
     }
-    for (_, worktree) in &plan.worktrees {
-        let dirty = git.worktree_is_dirty(worktree).unwrap_or(false);
-        let mark = if dirty { "  UNCOMMITTED WORK" } else { "" };
-        println!("  worktree     {}{mark}", worktree.display());
-    }
-    println!("no branch, no source file, and no repository is deleted.");
-    Ok(())
+    println!("no worktree, no branch, no source file, and no repository is deleted.");
 }
 
-fn project_rm(
-    store: &dyn Store,
-    git: &dyn Git,
-    slug: &str,
-    force: bool,
-    recursive: bool,
-) -> Result<Outcome> {
+fn project_rm(store: &dyn Store, slug: &str, force: bool, recursive: bool) -> Result<Outcome> {
     let mut registry = store.load_registry()?;
     let entry = registry
         .find(slug)
@@ -537,7 +674,7 @@ fn project_rm(
     let project = load_or_new(store, &entry)?;
     let plan = plan_removal(&project, &store.list_claude_dirs()?, recursive);
 
-    describe(&project, &plan, git)?;
+    describe(&project, &plan);
     if !force {
         println!("type the project name to confirm:");
         let mut typed = String::new();
@@ -548,11 +685,6 @@ fn project_rm(
         }
     }
 
-    for (repo, worktree) in &plan.worktrees {
-        if let Err(e) = git.worktree_remove(repo, worktree) {
-            println!("could not remove {}: {e}", worktree.display());
-        }
-    }
     for dir in &plan.claude_dirs {
         store.remove_claude_dir(dir)?;
     }
@@ -818,4 +950,357 @@ fn load_or_new(store: &dyn Store, entry: &ProjectEntry) -> Result<Project> {
 /// The registry, for a caller that only needs the project list.
 pub fn registry(store: &dyn Store) -> Result<Registry> {
     store.load_registry()
+}
+
+/// What every `culm session` command needs.
+struct SessionCtx<'a> {
+    store: &'a dyn Store,
+    git: &'a dyn Git,
+    hooks: &'a dyn crate::hooks::HookListener,
+    cwd: &'a Path,
+    caller: &'a Caller,
+}
+
+impl SessionCtx<'_> {
+    /// The project named by `--project`, then the caller's, then the one that owns
+    /// the working directory.
+    fn project(&self, named: Option<&str>) -> Result<ProjectEntry> {
+        let registry = self.store.load_registry()?;
+        let slug = named.or(self.caller.project.as_deref());
+        Ok(find_entry(&registry, slug, self.cwd)?.clone())
+    }
+
+    /// The project and the session a command acts on. The caller's session counts
+    /// only inside the caller's own project.
+    fn target(&self, target: &Target) -> Result<(ProjectEntry, String)> {
+        let entry = self.project(target.project.as_deref())?;
+        let inherited = self
+            .caller
+            .session
+            .clone()
+            .filter(|_| self.caller.project.as_deref() == Some(entry.slug.as_str()));
+        let session = target.session.clone().or(inherited).ok_or_else(|| {
+            anyhow!("name the session with --session, or run this inside a culm session")
+        })?;
+        Ok((entry, session))
+    }
+
+    /// An absolute path, read against the working directory of the command line.
+    fn absolute(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd.join(path)
+        }
+    }
+}
+
+/// Applies one command to a project. A project open in a window gets the command
+/// through its socket, because the window owns its state and would write over a
+/// change made to the file. A closed project is changed in its file.
+fn deliver(ctx: &SessionCtx<'_>, slug: &str, command: &SessionCommand) -> Result<Reply> {
+    if ctx.hooks.is_open(slug) {
+        return ctx.hooks.request(slug, command);
+    }
+    let registry = ctx.store.load_registry()?;
+    let entry = registry
+        .find(slug)
+        .ok_or_else(|| anyhow!("no project named {slug}. run: culm project list"))?;
+    let mut project = load_or_new(ctx.store, entry)?;
+    let mut records: Vec<&mut SessionRecord> = project.sessions.iter_mut().collect();
+    let reply = crate::command::apply(&mut records, command);
+    if reply.changed {
+        ctx.store.save_project(&project)?;
+    }
+    Ok(reply)
+}
+
+/// Prints a reply. A refusal is an error, so a script sees a failing exit code.
+fn print_reply(reply: &Reply) -> Result<Outcome> {
+    if !reply.ok {
+        bail!("{}", reply.text.trim_end());
+    }
+    println!("{}", reply.text.trim_end());
+    Ok(Outcome::Done)
+}
+
+/// What git says about the checkout that holds `path`, as a worktree to register.
+fn worktree_at(ctx: &SessionCtx<'_>, path: &Path) -> Result<SessionRepo> {
+    let path = ctx.absolute(path);
+    let info = ctx
+        .git
+        .worktree_info(&path)?
+        .ok_or_else(|| anyhow!("{} is in no git repository", path.display()))?;
+    Ok(SessionRepo {
+        name: info.repo,
+        worktree: info.top,
+        branch: info.branch,
+    })
+}
+
+fn session_cmd(ctx: &SessionCtx<'_>, cmd: SessionCmd) -> Result<Outcome> {
+    let (slug, command) = match cmd {
+        SessionCmd::List { project } => {
+            (ctx.project(project.as_deref())?.slug, SessionCommand::List)
+        }
+        SessionCmd::Show { target } => {
+            let (entry, session) = ctx.target(&target)?;
+            (entry.slug, SessionCommand::Show { session })
+        }
+        SessionCmd::Ticket {
+            ticket,
+            clear,
+            target,
+        } => {
+            let (entry, session) = ctx.target(&target)?;
+            let ticket = if clear { None } else { ticket };
+            (entry.slug, SessionCommand::Ticket { session, ticket })
+        }
+        SessionCmd::Port {
+            port,
+            clear,
+            target,
+        } => {
+            let (entry, session) = ctx.target(&target)?;
+            let port = if clear { None } else { port };
+            (entry.slug, SessionCommand::Port { session, port })
+        }
+        SessionCmd::Worktree(WorktreeCmd::Add { path, target }) => {
+            let (entry, session) = ctx.target(&target)?;
+            let worktree = worktree_at(ctx, &path)?;
+            (
+                entry.slug,
+                SessionCommand::WorktreeAdd { session, worktree },
+            )
+        }
+        SessionCmd::Worktree(WorktreeCmd::Rm { path, target }) => {
+            let (entry, session) = ctx.target(&target)?;
+            // A worktree already deleted from disk is still forgotten by its path.
+            let path = match ctx.git.worktree_info(&ctx.absolute(&path))? {
+                Some(info) => info.top,
+                None => ctx.absolute(&path),
+            };
+            (entry.slug, SessionCommand::WorktreeRm { session, path })
+        }
+        SessionCmd::Adopt { project, yes } => return adopt(ctx, project.as_deref(), yes),
+    };
+    print_reply(&deliver(ctx, &slug, &command)?)
+}
+
+/// One worktree a session worked in and has not registered, and how many lines of
+/// its transcript point there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub worktree: SessionRepo,
+    pub evidence: usize,
+}
+
+/// The worktrees each session worked in, from its transcript, most evidence first.
+///
+/// A line counts when the session's shell stood in the worktree or the session wrote
+/// a file there. Only linked worktrees count, because a main checkout is shared by
+/// every session. A worktree under `temp` is a scratch copy, and a worktree the
+/// session already registered is left out. Archived sessions are skipped.
+pub fn adoption(
+    store: &dyn Store,
+    git: &dyn Git,
+    project: &Project,
+    temp: &Path,
+) -> Result<Vec<(SessionRecord, Vec<Candidate>)>> {
+    let mut checkouts: std::collections::HashMap<PathBuf, Option<crate::git::WorktreeInfo>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for record in project.sessions.iter().filter(|r| !r.is_archived()) {
+        let Ok(text) = store.read_transcript(&transcript_dir_name(&record.cwd), &record.id) else {
+            continue;
+        };
+        let mut places = transcript::visited_dirs(&text);
+        for file in transcript::edited_files(&text) {
+            if let Some(dir) = file.parent() {
+                places.push((dir.to_path_buf(), 1));
+            }
+        }
+        let mut found: Vec<Candidate> = Vec::new();
+        for (dir, count) in places {
+            let info = match checkouts.get(&dir) {
+                Some(info) => info.clone(),
+                None => {
+                    let info = git.worktree_info(&dir)?;
+                    checkouts.insert(dir.clone(), info.clone());
+                    info
+                }
+            };
+            let Some(info) = info.filter(|i| i.linked && !i.top.starts_with(temp)) else {
+                continue;
+            };
+            if record.repos.iter().any(|r| r.worktree == info.top) {
+                continue;
+            }
+            match found.iter_mut().find(|c| c.worktree.worktree == info.top) {
+                Some(c) => c.evidence += count,
+                None => found.push(Candidate {
+                    worktree: SessionRepo {
+                        name: info.repo,
+                        worktree: info.top,
+                        branch: info.branch,
+                    },
+                    evidence: count,
+                }),
+            }
+        }
+        if !found.is_empty() {
+            found.sort_by(|a, b| b.evidence.cmp(&a.evidence));
+            out.push((record.clone(), found));
+        }
+    }
+    Ok(out)
+}
+
+/// Offers each session the worktrees it worked in, and registers the ones the user
+/// picks, or all of them with `--yes`.
+fn adopt(ctx: &SessionCtx<'_>, named: Option<&str>, yes: bool) -> Result<Outcome> {
+    let entry = ctx.project(named)?;
+    let project = load_or_new(ctx.store, &entry)?;
+    let found = adoption(ctx.store, ctx.git, &project, &std::env::temp_dir())?;
+    if found.is_empty() {
+        println!("no session worked in a worktree it has not registered");
+        return Ok(Outcome::Done);
+    }
+    let sessions = match found.len() {
+        1 => "1 session worked in worktrees it has".to_string(),
+        n => format!("{n} sessions worked in worktrees they have"),
+    };
+    println!(
+        "{sessions} not registered. for each session, pick the worktrees that belong to it. \
+         a worktree the session only visited usually has few transcript lines.\n"
+    );
+    for (record, candidates) in found {
+        print!("{}", offer(&record, &candidates));
+        // The question ends without a newline, and stdout holds a partial line back.
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let picked: Vec<&Candidate> = if yes {
+            candidates.iter().collect()
+        } else {
+            let mut typed = String::new();
+            std::io::stdin().read_line(&mut typed)?;
+            pick(&typed, &candidates)
+        };
+        if picked.is_empty() {
+            println!("  nothing registered for {}", record.name);
+        }
+        for c in picked {
+            let reply = deliver(
+                ctx,
+                &entry.slug,
+                &SessionCommand::WorktreeAdd {
+                    session: record.id.clone(),
+                    worktree: c.worktree.clone(),
+                },
+            )?;
+            println!("  {}", reply.text.trim_end());
+        }
+    }
+    Ok(Outcome::Done)
+}
+
+/// The question `adopt` asks about one session: the session, each worktree with its
+/// repository and its evidence, and how to answer.
+fn offer(record: &SessionRecord, candidates: &[Candidate]) -> String {
+    let state = match record.state {
+        SessionState::Active => "active",
+        SessionState::Paused => "paused",
+        SessionState::Archived => "archived",
+    };
+    let mut text = format!("{} ({state})\n", record.name);
+    for (i, c) in candidates.iter().enumerate() {
+        let lines = if c.evidence == 1 { "line" } else { "lines" };
+        text.push_str(&format!(
+            "  {}) {}\n     repository {}, seen on {} transcript {lines}\n",
+            i + 1,
+            c.worktree.worktree.display(),
+            c.worktree.name,
+            c.evidence
+        ));
+    }
+    text.push_str(&format!(
+        "register these worktrees for {}?\n  a = all of them, 1 3 = only those numbers, \
+         Enter = none: ",
+        record.name
+    ));
+    text
+}
+
+/// The candidates an answer picks: `a` for all, or 1-based numbers. Anything else
+/// picks nothing.
+fn pick<'a>(typed: &str, candidates: &'a [Candidate]) -> Vec<&'a Candidate> {
+    let typed = typed.trim();
+    if typed.eq_ignore_ascii_case("a") {
+        return candidates.iter().collect();
+    }
+    typed
+        .split_whitespace()
+        .filter_map(|n| n.parse::<usize>().ok())
+        .filter_map(|n| n.checked_sub(1).and_then(|i| candidates.get(i)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(path: &str) -> Candidate {
+        Candidate {
+            worktree: SessionRepo {
+                name: "api".into(),
+                worktree: PathBuf::from(path),
+                branch: String::new(),
+            },
+            evidence: 1,
+        }
+    }
+
+    #[test]
+    fn the_adopt_question_names_the_session_its_state_and_every_way_to_answer() {
+        let record = SessionRecord {
+            id: "id".into(),
+            name: "workspace".into(),
+            slug: "workspace".into(),
+            state: SessionState::Paused,
+            cwd: PathBuf::from("/home/x/spm"),
+            repos: Vec::new(),
+            ticket: None,
+            port: None,
+            started: true,
+            last_active: 0,
+            last_input: 0,
+            recap: None,
+            recap_at: 0,
+            archived_from: None,
+        };
+        let text = offer(&record, &[candidate("/w/api")]);
+        assert!(text.starts_with("workspace (paused)\n"), "{text}");
+        assert!(text.contains("1) /w/api"), "{text}");
+        assert!(text.contains("seen on 1 transcript line\n"), "{text}");
+        assert!(
+            text.contains("register these worktrees for workspace?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("a = all") && text.contains("1 3 =") && text.contains("Enter = none"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_answer_picks_all_some_or_none() {
+        let all = [candidate("/a"), candidate("/b"), candidate("/c")];
+        assert_eq!(pick("a\n", &all).len(), 3);
+        let some: Vec<&Path> = pick("3 1", &all)
+            .iter()
+            .map(|c| c.worktree.worktree.as_path())
+            .collect();
+        assert_eq!(some, vec![Path::new("/c"), Path::new("/a")]);
+        assert!(pick("\n", &all).is_empty());
+        assert!(pick("0 9 x", &all).is_empty(), "out of range picks nothing");
+    }
 }

@@ -8,7 +8,7 @@ A grove of bamboo sends many culms up from one shared rhizome. Each stem stands 
 - **Many sessions per project.** One session per feature, all running at once, one on screen. Each session is a real, fully interactive Claude Code terminal.
 - **Know who needs you.** 🔐 needs a permission, ❓ needs an answer, ✅ finished. Every session shows its marker, and every tab shows the most urgent one inside it.
 - **Nothing gets lost.** Close culm, reboot, come back: every session resumes its whole conversation.
-- **Built for multi-repository work.** A project is any directory. Repositories join it from anywhere, and a session reaches all of them. Each session that edits a repository gets its own git worktree and branch, so parallel sessions never collide.
+- **Built for multi-repository work.** A project is any directory, and a session reaches every repository under it. Claude Code makes the worktrees a feature needs, and tells culm which ones belong to its session, together with the ticket and a port number. culm shows them and never touches your git.
 
 ## Install
 
@@ -43,11 +43,10 @@ culm hooks install
    culm project new ~/work/billing
    ```
 
-2. Add the repositories its sessions edit, from anywhere on disk:
+2. Optionally, add the repositories the project's shell shows changes for:
 
    ```
    culm project repo add ~/work/billing/api
-   culm project repo add ~/src/shared-lib
    ```
 
 3. Already have Claude Code sessions in that directory? Bring them in:
@@ -62,7 +61,7 @@ culm hooks install
    cd ~/work/billing && culm
    ```
 
-5. Press `Alt+Shift+N`, name the session, pick its repositories, and press `Enter`. Repeat for every feature you work on.
+5. Press `Alt+Shift+N`, name the session, and press `Enter`. Repeat for every feature you work on.
 
 Press `Alt+Shift+H` inside culm at any time for every shortcut.
 
@@ -116,7 +115,8 @@ The mouse works too: click a tab or a session, drag to select and copy, middle c
 - **Get a recap when you come back.** Run `culm config set recap-on-pause true`, and a paused session tells you what it was doing.
 - **Archive the done work.** Archived sessions leave the sidebar but stay one keystroke away in the archive list.
 - **See what a session changed.** `Alt+Shift+G` opens the diff of every repository the session wrote in, old beside new. Run `culm config set changes-maximized true` to open it over the whole session.
-- **Each session has its own branch.** culm creates a worktree per session and per repository, and never commits, pushes, or deletes a branch for you.
+- **Tell culm where a session works.** Inside a session, `culm session worktree add <path>`, `culm session ticket <key>`, and `culm session port <0-9>` record its worktrees, its ticket, and its port number. The changes panel opens on those worktrees, and the sidebar shows the port. Put the commands in your project's `CLAUDE.md`, and Claude Code runs them itself.
+- **Already have worktrees?** `culm session adopt` finds the worktrees each session worked in, from its conversation, and offers to record them.
 
 ## Command line
 
@@ -128,6 +128,9 @@ culm workspace list                     # every workspace and its projects
 culm workspace add <name> <project>     # add a tab to a workspace
 culm workspace remove <name> <project>  # take a tab out of a workspace
 culm config list                        # settings for every project
+culm session show                       # what this session recorded
+culm session list                       # every session with its ticket and port
+culm port list                          # which port numbers are free
 ```
 
 `culm --help` and `culm <command> --help` list the rest.

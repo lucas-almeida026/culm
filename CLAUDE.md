@@ -42,7 +42,8 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 
 ## Not in scope
 
-- Any git write other than creating and removing worktrees: commit, push, stage, checkout, merge, and branch deletion. culm reads a repository to show what a session changed, and never changes it.
+- Any git write: worktree creation and removal, commit, push, stage, checkout, merge, fetch, and branch deletion. culm reads a repository to show what a session changed, and never changes it.
+- Any project rule about worktree layout, branch names, or what a port number means. The project's `CLAUDE.md` holds those rules, and Claude Code follows them.
 - Automatic acceptance of permission prompts.
 - Any change to where the Claude Code CLI writes transcripts.
 - A graphical interface.
@@ -54,7 +55,9 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 | --- | --- |
 | The project is the unit, and a project is any directory. | The author's projects span many repositories. A tool that binds a session to one git repository does not fit. |
 | A session reaches every repository of its project. | One feature often edits two repositories at once. |
-| One git worktree and one branch per session per repository. | Two sessions that edit one repository must not collide. |
+| Claude Code makes a session's worktrees, and registers them with `culm session worktree add`. | Claude Code owns the code. Each project lays out its worktrees, names its branches, and prepares its dependencies in its own way, and the project's `CLAUDE.md` already says how. culm only needs to know where a session works. |
+| A session records a ticket and a port number from 0 to 9. Two sessions may share a number. | A session that runs servers needs ports no other running session uses. Ten numbers keep one digit each. Two sessions that never run at the same time may share one, and only the user knows when that holds. |
+| A command for an open project goes through the project's socket. | The window owns the state of an open project and writes it on the tick. A file write from the command line would be lost. |
 | One window holds up to eight projects as tabs. | A browser is the familiar model for many open things, one visible. Eight keeps one digit per tab. |
 | One process, no daemon. | One process is simple to reason about and to test. Crash survival is deferred, not refused. It is a v1.0 item. |
 | culm owns every pseudoterminal and parses every session with `vt100`. | culm must render a session inside its own layout, and keep every session drained. |
@@ -64,7 +67,8 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 | `Alt` is the only leader key. No function key is reserved. | Every reserved key is a key Claude Code loses. |
 | Workspaces name sets of projects. | Reopening the same set of projects every day must cost one command. |
 | culm shows each session's changes in a read-only diff panel. | Reviewing what a session changed is part of every switch between features. A separate git client must be pointed at every worktree by hand. A panel that only reads can never damage a session's work. |
-| The changes panel finds a session's repositories in its transcript. | Projects keep their worktrees in different layouts, and some use none. The files a session wrote name its repositories in every layout, with no rule to configure. |
+| The changes panel shows a session's registered worktrees, then finds its other repositories in its transcript. | A registered worktree shows before the first edit. Projects keep their worktrees in different layouts, and some use none. The files a session wrote name its other repositories in every layout, with no rule to configure. |
+| When a session registered a worktree, the changes panel lists only the files the session wrote in each other repository. | Several sessions write to one docs repository. Its full list mixes their work. |
 | The changes panel reads git when Claude Code finishes a turn. | A turn's edits settle when the turn ends. A read on every tool call shows half-made edits and costs one git call per tool call. |
 | The project is closed to contributions. | culm serves one workflow. A fork serves another. |
 

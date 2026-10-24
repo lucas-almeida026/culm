@@ -9,9 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{
-    Answer, App, ArchiveList, ConfirmDelete, Entry, Field, Focus, Modal, Pane, Rename,
-};
+use crate::app::{Answer, App, ArchiveList, ConfirmDelete, Entry, Focus, Modal, Pane, Rename};
 use crate::browser::{Browser, BrowserHit, BrowserModal, Picker, SaveChoice, SavePrompt};
 use crate::gitview::{GIT_MIN_WIDTH, GitSplit};
 use crate::hooks::Attention;
@@ -460,7 +458,7 @@ pub fn draw_app(f: &mut Frame, app: &App, area: Rect) -> HitBox {
     }
     let mut buttons = Vec::new();
     match app.modal() {
-        Some(Modal::NewSession(form)) => draw_form(f, app, form, panel),
+        Some(Modal::NewSession(form)) => draw_form(f, form, panel),
         Some(Modal::ConfirmDelete(confirm)) => buttons = draw_confirm(f, confirm, panel),
         Some(Modal::Rename(rename)) => draw_rename(f, rename, panel),
         Some(Modal::Help) => draw_help(f, panel),
@@ -610,7 +608,8 @@ fn dim(text: &str) -> Line<'static> {
     ))
 }
 
-/// One session row: the marker, the name, and the memory of its process tree.
+/// One session row: the marker, the name, the port number when the session holds
+/// one, and the memory of its process tree.
 fn entry_line(entry: &Entry, focused: bool, cursor: bool, inner_width: usize) -> Line<'static> {
     let base = if focused {
         Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -629,13 +628,16 @@ fn entry_line(entry: &Entry, focused: bool, cursor: bool, inner_width: usize) ->
         },
     );
     let label = " ".to_string();
-    let rss = if entry.is_active() && entry.rss > 0 {
+    let mut rss = if entry.is_active() && entry.rss > 0 {
         format!("{} ", format_bytes(entry.rss))
     } else {
         String::new()
     };
+    if let Some(port) = entry.record.port {
+        rss.insert_str(0, &format!(":{port} "));
+    }
 
-    let fixed = marker.width() + label.len() + rss.len();
+    let fixed = marker.width() + label.len() + rss.chars().count();
     let room = inner_width.saturating_sub(fixed);
     let name = truncate(entry.name(), room);
     let pad = room.saturating_sub(name.chars().count());
@@ -1107,10 +1109,8 @@ fn draw_fps(f: &mut Frame, app: &App, panel: Rect) {
     );
 }
 
-fn draw_form(f: &mut Frame, app: &App, form: &crate::app::NewSession, panel: Rect) {
-    let height = (form.chosen.len() as u16)
-        .saturating_add(7)
-        .min(panel.height);
+fn draw_form(f: &mut Frame, form: &crate::app::NewSession, panel: Rect) {
+    let height = 5.min(panel.height);
     let width = 60.min(panel.width.saturating_sub(2));
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
@@ -1118,49 +1118,17 @@ fn draw_form(f: &mut Frame, app: &App, form: &crate::app::NewSession, panel: Rec
         width,
         height,
     };
-
-    let name_style = if form.field == Field::Name {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    let mut lines = vec![
+    let lines = vec![
         Line::from(vec![
             Span::raw(" name  "),
-            Span::styled(format!("{} ", form.name), name_style),
+            Span::styled(
+                format!("{} ", form.name),
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            if form.field == Field::Repos {
-                " repositories  (1-9 toggles)"
-            } else {
-                " repositories"
-            },
-            Style::default().fg(Color::Cyan),
-        )),
+        dim(" Enter creates   Esc cancels"),
     ];
-    if app.project().repos.is_empty() {
-        lines.push(dim("  none. culm project repo add <path>"));
-    }
-    for (i, repo) in app.project().repos.iter().enumerate() {
-        let on = form.chosen.get(i).copied().unwrap_or(false);
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {} {} {}",
-                i + 1,
-                if on { "[x]" } else { "[ ]" },
-                repo.name
-            ),
-            if on {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(dim(" Tab switches field   Enter creates   Esc cancels"));
-
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" new session ")),
@@ -1434,8 +1402,6 @@ mod tests {
         let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
         let form = crate::app::NewSession {
             name: "lost".into(),
-            chosen: Vec::new(),
-            field: Field::Name,
         };
         app.create_session(&form, &deps).expect("lost starts");
         app.archive_focused(&deps).expect("lost is archived");
@@ -1522,6 +1488,46 @@ mod tests {
         for frame in SPINNER {
             assert_eq!(frame.chars().count(), 1, "{frame} is one cell");
         }
+    }
+
+    #[test]
+    fn a_session_row_ends_with_its_port_number() {
+        let record = crate::project::SessionRecord {
+            id: "id".into(),
+            name: "club-1138".into(),
+            slug: "club-1138".into(),
+            state: crate::project::SessionState::Paused,
+            cwd: "/home/x/spm".into(),
+            repos: Vec::new(),
+            ticket: None,
+            port: Some(7),
+            started: true,
+            last_active: 0,
+            last_input: 0,
+            recap: None,
+            recap_at: 0,
+            archived_from: None,
+        };
+        let mut entry = Entry {
+            record,
+            live: None,
+            attention: crate::hooks::Attention::None,
+            rss: 0,
+        };
+        let text = |entry: &Entry| -> String {
+            entry_line(entry, false, false, 24)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        let row = text(&entry);
+        assert!(row.starts_with("   club-1138"), "{row:?}");
+        assert!(row.ends_with(":7 "), "{row:?}");
+        assert_eq!(row.chars().count(), 24, "the row keeps its width");
+
+        entry.record.port = None;
+        assert!(!text(&entry).contains(':'), "no number, no mark");
     }
 
     #[test]

@@ -242,6 +242,8 @@ fn an_active_session_is_never_imported_twice() {
         state: SessionState::Active,
         cwd: PathBuf::from(ROOT),
         repos: Vec::new(),
+        ticket: None,
+        port: None,
         started: true,
         last_active: 5,
         last_input: 0,
@@ -334,6 +336,7 @@ fn project_new_with_the_flag_registers_and_imports() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     )
     .expect("project new succeeds");
 
@@ -365,6 +368,7 @@ fn open_with_the_flag_imports_before_the_interface_starts() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     )
     .expect("open succeeds");
 
@@ -393,6 +397,7 @@ fn project_import_works_on_an_existing_project() {
         &culm::testing::FakeHookListener::new(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
     )
     .expect("import succeeds");
 
