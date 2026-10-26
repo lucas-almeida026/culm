@@ -50,7 +50,10 @@ impl TranscriptIndex {
         let mut index = Self::default();
         for line in transcript.lines() {
             // A cheap test first, because tool results make up most of the file.
-            if !line.contains("\"text\"") && !line.contains("\"content\":\"") {
+            if !line.contains("\"text\"")
+                && !line.contains("\"thinking\"")
+                && !line.contains("\"content\":\"")
+            {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -63,10 +66,14 @@ impl TranscriptIndex {
                         .and_then(Value::as_array)
                         .into_iter()
                         .flatten();
+                    // Claude Code shows the thinking of a turn as text too.
                     for part in parts {
-                        if part.get("type").and_then(Value::as_str) == Some("text")
-                            && let Some(text) = part.get("text").and_then(Value::as_str)
-                        {
+                        let field = match part.get("type").and_then(Value::as_str) {
+                            Some("text") => "text",
+                            Some("thinking") => "thinking",
+                            _ => continue,
+                        };
+                        if let Some(text) = part.get(field).and_then(Value::as_str) {
                             index.push(text);
                         }
                     }
@@ -169,13 +176,25 @@ pub fn rebuild(selection: &str, before: &str, index: &TranscriptIndex, cols: u16
             }
         }
         let mut gap = &selection[raw_from..spans[p].0];
+        let line_start = text[..a].rfind('\n').map_or(0, |i| i + 1);
+        let screen_head = gap.rfind('\n').map_or(0, |i| i + 1);
+        let tail = &gap[screen_head..];
+        let head = &text[line_start..a];
+        // Past the start of the selection, a run counts only where it opens a
+        // screen row and a markdown line alike. Words in a tool line or in command
+        // output also appear in answers that quote them, and they start mid-row,
+        // after `Bash(` or `⎿`.
+        let anchored = raw_from == 0
+            || (gap.contains('\n')
+                && opens_row(tail)
+                && (head.trim().is_empty() || is_line_marker(head)));
+        if !anchored {
+            p += 1;
+            continue;
+        }
         // Where the run starts a screen row, the markdown's own line start replaces
         // the indent and the bullet the screen draws. Mid-row, the gap is text.
         if raw_from == 0 || gap.contains('\n') {
-            let line_start = text[..a].rfind('\n').map_or(0, |i| i + 1);
-            let screen_head = gap.rfind('\n').map_or(0, |i| i + 1);
-            let tail = &gap[screen_head..];
-            let head = &text[line_start..a];
             // The answer bullet and the indent are drawing. The prompt mark says
             // who wrote the line, so it stays.
             let drawing = matches!(tail.trim(), "" | "●");
@@ -397,6 +416,12 @@ fn is_line_marker(head: &str) -> bool {
             && head[..head.len() - 1].chars().all(|c| c.is_ascii_digit()))
 }
 
+/// True for screen text that can stand before the first word of an answer row:
+/// the indent, the answer bullet, the prompt mark, or a list marker.
+fn opens_row(tail: &str) -> bool {
+    matches!(tail.trim(), "" | "●" | "❯") || is_screen_marker(tail)
+}
+
 /// True for screen text before a word that only opens its line: spaces, a bullet,
 /// or a list number.
 fn is_screen_marker(head: &str) -> bool {
@@ -508,6 +533,37 @@ mod tests {
         assert_eq!(
             got.text, "1. Exclusão de conta: fora",
             "a selected number is kept"
+        );
+    }
+
+    #[test]
+    fn a_tool_line_that_quotes_an_answer_stays_as_drawn() {
+        let index = TranscriptIndex::new(&transcript(&[
+            "Copiei a mudança do worktree `.worktrees/CLUB-1247/pague-menos-app`, onde ela estava.",
+        ]));
+        let screen = "Copiei a mudança do worktree\n\n● Bash(git -C ../.worktrees/CLUB-1247/pague-menos-app diff)";
+        let got = rebuild(screen, "", &index, 90);
+        assert_eq!(
+            got.text,
+            "Copiei a mudança do worktree\n\n● Bash(git -C ../.worktrees/CLUB-1247/pague-menos-app diff)"
+        );
+    }
+
+    #[test]
+    fn the_thinking_claude_code_shows_comes_back_as_its_markdown() {
+        let line = serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "O `main` está igual ao `origin/main`; vou procurar cópias."}
+        ]}});
+        let index = TranscriptIndex::new(&line.to_string());
+        let got = rebuild(
+            "O main está igual ao origin/main; vou\n  procurar cópias.",
+            "",
+            &index,
+            40,
+        );
+        assert_eq!(
+            got.text,
+            "O `main` está igual ao `origin/main`; vou procurar cópias."
         );
     }
 

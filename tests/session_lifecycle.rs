@@ -4550,3 +4550,113 @@ fn a_markdown_copy_leaves_the_shell_as_drawn() {
 
     assert_eq!(app.clipboard(), "a shell");
 }
+
+/// A panel as tall as the session, so every row of it takes a click.
+fn tall_hit() -> HitBox {
+    HitBox {
+        panel: Rect::new(30, 0, 82, 26),
+        inner: culm::ui::inner_of(Rect::new(30, 0, 82, 26)),
+        ..panel_hit()
+    }
+}
+
+/// Draws what Claude Code shows with its view `first` lines from the top: the
+/// conversation, the prompt it pins over the first row and the notice it draws
+/// over the last row while scrolled, and the prompt box below.
+fn redraw_claude(app: &App, first: usize, scrolled: bool) {
+    let mut out = b"\x1b[2J\x1b[H".to_vec();
+    for row in 0..24usize {
+        if row > 0 {
+            out.extend(b"\r\n");
+        }
+        let text = match row {
+            0 if scrolled => "> pinned prompt".to_string(),
+            21 if scrolled => format!("line-{:03}        Jump to bottom (ctrl+End)", first + row),
+            22 => "----------------".to_string(),
+            23 => "> ".to_string(),
+            _ => format!("line-{:03}", first + row),
+        };
+        out.extend(text.into_bytes());
+    }
+    repaint(app, &out);
+}
+
+fn alt_click(app: &mut App, f: &Fakes, hit: &HitBox, cell: (u16, u16)) {
+    let d = f.deps();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.on_mouse_with(kind, cell.0, cell.1, KeyModifiers::ALT, hit, &d);
+    }
+}
+
+fn lines(from: usize, to: usize) -> String {
+    (from..=to)
+        .map(|n| format!("line-{n:03}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_selection_carried_off_a_self_scrolling_panel_copies_every_row_it_covers() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = tall_hit();
+    drag(&mut app, &f, &hit, at(22, 7), at(22, 0));
+    assert_eq!(app.clipboard(), "line-199");
+
+    for first in [174, 171, 168] {
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+        redraw_from(&app, first, 24);
+        app.settle_scroll();
+    }
+    alt_click(&mut app, &f, &hit, at(0, 0));
+
+    assert_eq!(app.clipboard(), lines(168, 199));
+}
+
+#[test]
+fn a_copy_off_a_scrolled_claude_panel_leaves_out_what_it_draws_over_the_text() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    redraw_claude(&app, 178, false);
+    let hit = tall_hit();
+    drag(&mut app, &f, &hit, at(21, 7), at(21, 0));
+    assert_eq!(app.clipboard(), "line-199");
+
+    for first in [175, 172, 169] {
+        app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+        redraw_claude(&app, first, true);
+        app.settle_scroll();
+    }
+    alt_click(&mut app, &f, &hit, at(1, 0));
+
+    assert_eq!(
+        app.clipboard(),
+        lines(170, 199),
+        "no pinned prompt, no notice, and no prompt box"
+    );
+}
+
+#[test]
+fn a_notch_waits_while_the_last_one_is_measured() {
+    let f = Fakes::with_output(&mouse_grabbing_output());
+    let mut app = text_session(&f, "line-199");
+    let hit = tall_hit();
+    drag(&mut app, &f, &hit, at(22, 0), at(22, 7));
+    let notches = |f: &Fakes| written(f, "one").matches("\x1b[<64;").count();
+
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    app.on_mouse(MouseEventKind::ScrollUp, 40, 5, &hit, &f.deps());
+    assert_eq!(
+        notches(&f),
+        1,
+        "the second notch waits for the first repaint"
+    );
+
+    redraw_from(&app, 174, 24);
+    app.settle_scroll();
+    assert_eq!(notches(&f), 2, "the measure sends the next notch");
+    assert_eq!(app.selection(), Some(((25, 0), (25, 7))));
+}

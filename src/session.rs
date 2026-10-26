@@ -240,6 +240,17 @@ impl Session {
             .collect()
     }
 
+    /// The text of every panel row, top to bottom.
+    #[must_use]
+    pub fn row_texts(&self) -> Vec<String> {
+        let parser = match self.parser.lock() {
+            Ok(p) => p,
+            Err(e) => e.into_inner(),
+        };
+        let (_, cols) = parser.screen().size();
+        parser.screen().rows(0, cols).collect()
+    }
+
     /// The text of a linear selection, both ends included.
     ///
     /// Each end is `(row, column)`, counted inside the panel border at the offset the

@@ -23,6 +23,7 @@ pub mod paste;
 pub mod project;
 pub mod pty;
 pub mod recap;
+pub mod seen;
 pub mod session;
 pub mod stats;
 pub mod store;

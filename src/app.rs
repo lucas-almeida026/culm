@@ -247,10 +247,24 @@ struct RecapWork {
 #[derive(Debug, Clone)]
 struct PendingScroll {
     before: Vec<u64>,
+    /// The same rows as text, so the rows the child moved can be kept.
+    before_text: Vec<String>,
     /// Passes spent waiting. A child that ignores the wheel must not hold a
     /// selection for ever.
     tries: u32,
 }
+
+/// One wheel notch waiting to go to a self-scrolling child.
+#[derive(Debug, Clone, Copy)]
+struct HeldNotch {
+    up: bool,
+    column: u16,
+    row: u16,
+    panel: Rect,
+}
+
+/// The most notches culm holds. A flick past this many is cut short.
+const HELD_NOTCHES: usize = 64;
 
 /// The archive list. It holds its own search, apart from the paused list's, so the
 /// two never filter each other.
@@ -311,6 +325,13 @@ pub struct App {
     selection: Option<Selection>,
     /// A forwarded wheel notch that has not been measured yet.
     pending_scroll: Option<PendingScroll>,
+    /// Wheel notches for a self-scrolling child that wait for the last one to be
+    /// measured. Notches sent together move the text further than the panel is
+    /// tall, and two panels that far apart share no row to line up.
+    held_wheel: std::collections::VecDeque<HeldNotch>,
+    /// The rows a self-scrolling child moved off the panel while a selection was
+    /// held, so a copy reaches them.
+    seen: crate::seen::SeenRows,
     /// The quit in progress, if any.
     closing: Option<Closing>,
     /// Settings shared by every project.
@@ -378,6 +399,8 @@ impl App {
             dirty: false,
             selection: None,
             pending_scroll: None,
+            held_wheel: std::collections::VecDeque::new(),
+            seen: crate::seen::SeenRows::default(),
             closing: None,
             config: Config::default(),
             recap_work: None,
@@ -1294,6 +1317,22 @@ impl App {
         if self.modal.is_some() {
             return;
         }
+        // While a selection rides on a self-scrolling child, each notch waits for the
+        // last one to be measured.
+        let grabbed = self
+            .focused_session()
+            .is_some_and(|s| s.mouse_encoding().is_some());
+        if grabbed && self.selection.is_some() && self.pending_scroll.is_some() {
+            if self.held_wheel.len() < HELD_NOTCHES {
+                self.held_wheel.push_back(HeldNotch {
+                    up,
+                    column,
+                    row,
+                    panel,
+                });
+            }
+            return;
+        }
         let Some(session) = self.focused_session_mut() else {
             return;
         };
@@ -1310,7 +1349,7 @@ impl App {
                 let _ = session.send(&bytes);
                 // The child moves its own text, and not now but whenever it repaints.
                 // Keep the rows as they are so the move can be measured later.
-                (0, Some(session.row_fingerprint()))
+                (0, Some((session.row_fingerprint(), session.row_texts())))
             }
             None => (
                 session.scroll_by(if up { WHEEL_LINES } else { -WHEEL_LINES }),
@@ -1318,12 +1357,15 @@ impl App {
             ),
         };
         self.carry_selection(moved);
-        if let Some(before) = forwarded
+        if let Some((before, before_text)) = forwarded
             && self.selection.is_some()
             && self.pending_scroll.is_none()
         {
-            // Several notches in a row measure as one move, so the oldest rows stay.
-            self.pending_scroll = Some(PendingScroll { before, tries: 0 });
+            self.pending_scroll = Some(PendingScroll {
+                before,
+                before_text,
+                tries: 0,
+            });
         }
     }
 
@@ -1338,6 +1380,7 @@ impl App {
             return;
         };
         if self.selection.is_none() {
+            self.release_held_wheel();
             return;
         }
         let Some(now) = self.focused_session().map(Session::row_fingerprint) else {
@@ -1346,17 +1389,39 @@ impl App {
         pending.tries = pending.tries.saturating_add(1);
         if now == pending.before {
             // Nothing has arrived yet. A child that ignores the notch would otherwise
-            // hold the selection for ever, so the wait ends.
+            // hold the selection for ever, so the wait ends, and the notches behind
+            // it would move nothing either.
             if pending.tries < SCROLL_SETTLE_TRIES {
                 self.pending_scroll = Some(pending);
+            } else {
+                self.held_wheel.clear();
             }
             return;
         }
         match row_shift(&pending.before, &now) {
-            Some(lines) => self.carry_selection(lines),
+            Some(lines) => {
+                if let Some(now_text) = self.focused_session().map(Session::row_texts) {
+                    self.seen.moved(&pending.before_text, &now_text, lines);
+                }
+                self.carry_selection(lines);
+            }
             // The panel changed in a way that is not a scroll, so the marks no longer
             // name the text the user chose.
-            None => self.selection = None,
+            None => {
+                self.selection = None;
+                self.seen.clear();
+            }
+        }
+        self.release_held_wheel();
+    }
+
+    /// Sends the next held notch, or every one once no selection waits on them.
+    fn release_held_wheel(&mut self) {
+        while let Some(notch) = self.held_wheel.pop_front() {
+            self.wheel(notch.up, notch.column, notch.row, notch.panel);
+            if self.pending_scroll.is_some() {
+                break;
+            }
         }
     }
 
@@ -2372,6 +2437,7 @@ impl App {
                             anchor: cell,
                             head: cell,
                         });
+                        self.seen.clear();
                     }
                 }
             }
@@ -2653,7 +2719,13 @@ impl App {
             self.selection = None;
             return;
         };
-        let mut text = session.text_between(start, end);
+        // A child that scrolls itself leaves no scrollback, so the rows it moved off
+        // the panel come from what culm kept while the selection rode along.
+        let mut text = if session.mouse_encoding().is_some() && !self.seen.is_empty() {
+            crate::seen::text_between(&self.seen, &session.row_texts(), start, end)
+        } else {
+            session.text_between(start, end)
+        };
         if text.is_empty() {
             self.selection = None;
             return;
@@ -2689,11 +2761,12 @@ impl App {
             .read_transcript(&dir, &entry.record.id)
             .map(|t| crate::copytext::TranscriptIndex::new(&t))
             .unwrap_or_default();
-        let before = if start.0 > 0 {
-            session.text_between(
-                ((start.0 - COPY_CONTEXT_ROWS).max(0), 0),
-                (start.0 - 1, self.cols.saturating_sub(1)),
-            )
+        let above = (start.0 - COPY_CONTEXT_ROWS, 0);
+        let last = (start.0 - 1, self.cols.saturating_sub(1));
+        let before = if session.mouse_encoding().is_some() && !self.seen.is_empty() {
+            crate::seen::text_between(&self.seen, &session.row_texts(), above, last)
+        } else if start.0 > 0 {
+            session.text_between((above.0.max(0), 0), last)
         } else {
             String::new()
         };
@@ -2703,6 +2776,11 @@ impl App {
     /// Resizes every running session to the panel. Sessions that are not visible are
     /// resized as well, so a switch never shows a stale layout.
     pub fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
+        // The loop calls this every frame. A child lays its text out again only at a
+        // new size, and then no kept row holds.
+        if (rows, cols) != (self.rows, self.cols) {
+            self.seen.clear();
+        }
         self.rows = rows;
         self.cols = cols;
         for entry in &mut self.entries {
