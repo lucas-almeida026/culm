@@ -69,6 +69,7 @@ culm targets Debian-based Linux distributions. The release ships a `.deb` and a 
 | culm shows each session's changes in a read-only diff panel. | Reviewing what a session changed is part of every switch between features. A separate git client must be pointed at every worktree by hand. A panel that only reads can never damage a session's work. |
 | The changes panel shows a session's registered worktrees, then finds its other repositories in its transcript. | A registered worktree shows before the first edit. Projects keep their worktrees in different layouts, and some use none. The files a session wrote name its other repositories in every layout, with no rule to configure. |
 | When a session registered a worktree, the changes panel lists only the files the session wrote in each other repository. | Several sessions write to one docs repository. Its full list mixes their work. |
+| A copy of a Claude Code answer comes from its transcript. | Claude Code breaks every line to fit the panel and leaves no mark of it on the screen, so the screen cannot tell a real line break from the panel edge. The transcript holds each answer as written. |
 | The changes panel reads git when Claude Code finishes a turn. | A turn's edits settle when the turn ends. A read on every tool call shows half-made edits and costs one git call per tool call. |
 | The project is closed to contributions. | culm serves one workflow. A fork serves another. |
 

@@ -4464,3 +4464,89 @@ fn a_waiting_paste_still_reaches_its_session_after_a_switch() {
     assert_eq!(written(&f, "one"), format!("hi{PASTED}"));
     assert_eq!(written(&f, "two"), "");
 }
+
+/// What Claude Code draws for one answer on an 80 column panel: its own line breaks.
+const DRAWN_ANSWER: &[u8] = b"  \xe2\x97\x8f Pronto: o git worktree prune limpou o registro dessa worktree. A branch nao\r\n    esta mais presa a nenhuma worktree.\r\n";
+const ANSWER_MARKDOWN: &str = "Pronto: o **git worktree prune** limpou o registro dessa worktree. A branch nao esta mais presa a nenhuma worktree.";
+
+fn answer_session(f: &Fakes, markdown_copy: bool) -> App {
+    let mut app = text_session(f, "presa a nenhuma");
+    app.set_config(culm::config::Config {
+        copy_markdown: markdown_copy,
+        ..culm::config::Config::default()
+    });
+    let entry = &app.entries()[0];
+    let line = serde_json::json!({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": ANSWER_MARKDOWN}]}
+    });
+    f.store.put_transcript(
+        &culm::project::transcript_dir_name(&entry.record.cwd),
+        &entry.record.id,
+        0,
+        &line.to_string(),
+    );
+    app
+}
+
+#[test]
+fn a_markdown_copy_hands_over_the_answer_as_its_transcript_holds_it() {
+    let f = Fakes::with_output(DRAWN_ANSWER);
+    let mut app = answer_session(&f, true);
+    let hit = panel_hit();
+
+    drag(&mut app, &f, &hit, at(0, 0), at(1, 38));
+
+    assert_eq!(app.clipboard(), ANSWER_MARKDOWN);
+    assert!(app.status().ends_with("as markdown"), "{}", app.status());
+}
+
+#[test]
+fn a_plain_copy_keeps_the_lines_claude_code_drew() {
+    let f = Fakes::with_output(DRAWN_ANSWER);
+    let mut app = answer_session(&f, false);
+    let hit = panel_hit();
+
+    drag(&mut app, &f, &hit, at(0, 0), at(1, 38));
+
+    assert!(
+        app.clipboard().contains("nao\n    esta"),
+        "{:?}",
+        app.clipboard()
+    );
+}
+
+#[test]
+fn a_markdown_copy_without_a_transcript_still_joins_the_drawn_lines() {
+    let f = Fakes::with_output(DRAWN_ANSWER);
+    let mut app = text_session(&f, "presa a nenhuma");
+    app.set_config(culm::config::Config {
+        copy_markdown: true,
+        ..culm::config::Config::default()
+    });
+    let hit = panel_hit();
+
+    drag(&mut app, &f, &hit, at(0, 0), at(1, 38));
+
+    assert_eq!(
+        app.clipboard(),
+        "  ● Pronto: o git worktree prune limpou o registro dessa worktree. A branch nao esta mais presa a nenhuma worktree."
+    );
+}
+
+#[test]
+fn a_markdown_copy_leaves_the_shell_as_drawn() {
+    let f = Fakes::with_output(b"a shell prompt\r\n");
+    let mut app = App::open(project(), &f.deps(), 20, 50);
+    app.set_config(culm::config::Config {
+        copy_markdown: true,
+        ..culm::config::Config::default()
+    });
+    let hit = panel_hit();
+    let shell = app.shell().expect("the shell runs");
+    assert!(shell.wait_for_text("a shell prompt", Duration::from_secs(1)));
+
+    drag(&mut app, &f, &hit, at(0, 0), at(0, 6));
+
+    assert_eq!(app.clipboard(), "a shell");
+}

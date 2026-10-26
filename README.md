@@ -116,6 +116,7 @@ The mouse works too: click a tab or a session, drag to select and copy, middle c
 - **Archive the done work.** Archived sessions leave the sidebar but stay one keystroke away in the archive list.
 - **See what a session changed.** `Alt+Shift+G` opens the diff of every repository the session wrote in, old beside new. Run `culm config set changes-maximized true` to open it over the whole session.
 - **Tell culm where a session works.** Inside a session, `culm session worktree add <path>`, `culm session ticket <key>`, and `culm session port <0-9>` record its worktrees, its ticket, and its port number. The changes panel opens on those worktrees, and the sidebar shows the port. Put the commands in your project's `CLAUDE.md`, and Claude Code runs them itself.
+- **Copy answers with their formatting.** Run `culm config set copy-markdown true`, and a copy of a Claude Code answer comes back as the markdown Claude wrote, with whole lines instead of the breaks the panel drew.
 - **Already have worktrees?** `culm session adopt` finds the worktrees each session worked in, from its conversation, and offers to record them.
 
 ## Command line

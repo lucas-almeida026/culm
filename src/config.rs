@@ -23,6 +23,11 @@ pub struct Config {
     /// On by default. Claude Code suspends itself on `Ctrl+z`, and inside culm no
     /// shell exists to bring it back with `fg`, so the session freezes.
     pub block_ctrl_z: bool,
+    /// Copy a Claude Code answer as the markdown its transcript holds.
+    ///
+    /// Off by default while the rebuild is new. Claude Code breaks every line to fit
+    /// the panel, so a plain copy holds a line break wherever a line met the edge.
+    pub copy_markdown: bool,
 }
 
 impl Default for Config {
@@ -31,6 +36,7 @@ impl Default for Config {
             recap_on_pause: false,
             changes_maximized: false,
             block_ctrl_z: true,
+            copy_markdown: false,
         }
     }
 }
@@ -39,6 +45,7 @@ impl Default for Config {
 pub const RECAP_ON_PAUSE: &str = "recap-on-pause";
 pub const CHANGES_MAXIMIZED: &str = "changes-maximized";
 pub const BLOCK_CTRL_Z: &str = "block-ctrl-z";
+pub const COPY_MARKDOWN: &str = "copy-markdown";
 
 impl Config {
     /// Every setting and its current value, in the order the listing shows them.
@@ -48,6 +55,7 @@ impl Config {
             (RECAP_ON_PAUSE, self.recap_on_pause.to_string()),
             (CHANGES_MAXIMIZED, self.changes_maximized.to_string()),
             (BLOCK_CTRL_Z, self.block_ctrl_z.to_string()),
+            (COPY_MARKDOWN, self.copy_markdown.to_string()),
         ]
     }
 
@@ -67,6 +75,10 @@ impl Config {
             }
             BLOCK_CTRL_Z => {
                 self.block_ctrl_z = parse_bool(value).ok_or(SetError::Value)?;
+                Ok(())
+            }
+            COPY_MARKDOWN => {
+                self.copy_markdown = parse_bool(value).ok_or(SetError::Value)?;
                 Ok(())
             }
             _ => Err(SetError::Key),
@@ -119,6 +131,14 @@ mod tests {
         assert!(config.block_ctrl_z, "a file without the key blocks the key");
         config.set(BLOCK_CTRL_Z, "false").expect("a known setting");
         assert!(!config.block_ctrl_z);
+    }
+
+    #[test]
+    fn the_markdown_copy_is_off_until_asked_for() {
+        let mut config = Config::default();
+        assert!(!config.copy_markdown);
+        config.set(COPY_MARKDOWN, "on").expect("a known setting");
+        assert!(config.copy_markdown);
     }
 
     #[test]

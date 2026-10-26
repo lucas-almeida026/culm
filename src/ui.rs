@@ -885,8 +885,8 @@ const SHORTCUTS: [(&str, &str); 21] = [
 /// The settings that apply to every project, one switch per row.
 fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
     let width = 70.min(panel.width.saturating_sub(2));
-    // Twelve lines of content, plus the two border rows.
-    let height = 14.min(panel.height);
+    // Fifteen lines of content, plus the two border rows.
+    let height = 17.min(panel.height);
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
         y: panel.y + (panel.height.saturating_sub(height)) / 2,
@@ -921,6 +921,12 @@ fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
             Span::raw("  keep ctrl+z from claude code sessions"),
         ]),
         dim("        ctrl+z suspends claude, and no shell can bring it back."),
+        Line::from(""),
+        Line::from(vec![
+            switch(config.copy_markdown, 3),
+            Span::raw("  copy claude code answers as their markdown"),
+        ]),
+        dim("        lines come back whole, from the session's transcript."),
         Line::from(""),
         dim(" Up Down move   Space toggles   Esc closes"),
     ];

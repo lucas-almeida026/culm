@@ -53,10 +53,13 @@ const SPINNER_EVERY: u64 = 20;
 const RECAP_LIMIT_SECS: u64 = 45;
 
 /// The switches the settings form shows, one per row.
-pub const SETTINGS_ROWS: usize = 3;
+pub const SETTINGS_ROWS: usize = 4;
 
 /// How long the report of a forced quit stays on the bar, in seconds.
 const FORCED_QUIT_NOTICE_SECS: u64 = 5;
+
+/// Rows above a copy that break a tie when its words appear twice in the transcript.
+const COPY_CONTEXT_ROWS: i32 = 6;
 
 /// What the status bar shows after culm kept `Ctrl+z` from a session.
 pub const CTRL_Z_BLOCKED: &str =
@@ -1571,7 +1574,8 @@ impl App {
                     match self.settings_cursor {
                         0 => self.config.recap_on_pause = !self.config.recap_on_pause,
                         1 => self.config.changes_maximized = !self.config.changes_maximized,
-                        _ => self.config.block_ctrl_z = !self.config.block_ctrl_z,
+                        2 => self.config.block_ctrl_z = !self.config.block_ctrl_z,
+                        _ => self.config.copy_markdown = !self.config.copy_markdown,
                     }
                     // Settings are global, so they are written at once rather than
                     // waiting on a project to be saved.
@@ -2388,7 +2392,7 @@ impl App {
                 self.dragging = false;
                 self.dragging_git = false;
                 self.dragging_git_list = false;
-                self.finish_selection();
+                self.finish_selection(deps);
             }
             MouseEventKind::Down(MouseButton::Middle)
                 if self.modal.is_none() && hit.inner.contains(at) =>
@@ -2634,7 +2638,7 @@ impl App {
     /// A press and a release on one cell is a click, not a drag, and it selects
     /// nothing. The highlight stays after a real drag, as it does in a terminal,
     /// until the next click or the next keystroke.
-    fn finish_selection(&mut self) {
+    fn finish_selection(&mut self, deps: &Deps<'_>) {
         let Some(selection) = self.selection else {
             return;
         };
@@ -2649,14 +2653,51 @@ impl App {
             self.selection = None;
             return;
         };
-        let text = session.text_between(start, end);
+        let mut text = session.text_between(start, end);
         if text.is_empty() {
             self.selection = None;
             return;
         }
-        self.status_text = format!("copied {} chars", text.chars().count());
+        let mut how = "";
+        if self.config.copy_markdown
+            && let Some(rebuilt) = self.rebuild_copy(&text, start, deps)
+        {
+            if rebuilt.markdown {
+                how = " as markdown";
+            }
+            text = rebuilt.text;
+        }
+        self.status_text = format!("copied {} chars{how}", text.chars().count());
         self.clipboard = text.clone();
         self.copied = Some(text);
+    }
+
+    /// Rebuilds a copy of a Claude Code panel from the session's transcript. `None`
+    /// for the shell, which has no transcript and whose lines are all real.
+    fn rebuild_copy(
+        &self,
+        text: &str,
+        start: (i32, u16),
+        deps: &Deps<'_>,
+    ) -> Option<crate::copytext::Rebuilt> {
+        let entry = self.visible()?;
+        let session = entry.live.as_ref()?;
+        let dir = crate::project::transcript_dir_name(&entry.record.cwd);
+        // A transcript that cannot be read leaves the screen lines to the line rule.
+        let index = deps
+            .store
+            .read_transcript(&dir, &entry.record.id)
+            .map(|t| crate::copytext::TranscriptIndex::new(&t))
+            .unwrap_or_default();
+        let before = if start.0 > 0 {
+            session.text_between(
+                ((start.0 - COPY_CONTEXT_ROWS).max(0), 0),
+                (start.0 - 1, self.cols.saturating_sub(1)),
+            )
+        } else {
+            String::new()
+        };
+        Some(crate::copytext::rebuild(text, &before, &index, self.cols))
     }
 
     /// Resizes every running session to the panel. Sessions that are not visible are

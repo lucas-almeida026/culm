@@ -38,6 +38,7 @@ The process holds one hierarchy:
 | `src/command.rs` | What a session registers: its ticket, its port number, and its worktrees. `apply` holds every rule, and both the window and the command line call it. Pure. |
 | `src/recap.rs` | The headless recap child, behind `Recapper`. |
 | `src/namer.rs` | The headless child that names an imported session, behind `Namer`. |
+| `src/copytext.rs` | Rebuilds a copy of a Claude Code panel: the copied words found in the transcript come back as their markdown, and the rest of the screen lines are joined where they only met the edge. Pure functions. |
 | `src/transcript.rs` | Reads a Claude Code transcript: its head for an import, and the files a session wrote for the changes panel. |
 | `src/config.rs` | The settings that apply to every project. |
 | `src/stats.rs` | Memory sampling from `/proc`, behind `MemoryProbe`. |
@@ -138,6 +139,7 @@ culm turns on full mouse reporting, so the terminal reports every move.
 - **Tab bar:** a press on a tab focuses the tab and picks it up. A drag then carries the tab past every tab it crosses, by column only, until the release. Every other event goes to the focused project, a release over the tab bar included, so a drag inside a project never stays half done.
 - **Selection:** a drag over the panel selects cells, and the release copies them through OSC 52. culm draws the selection over the finished buffer, so the child never learns of it.
 - **Wheel:** a child that asked for mouse reporting gets the wheel, as Claude Code does. For other children, culm scrolls its own `vt100` scrollback.
+- **Markdown copy:** with `copy-markdown` on, a copy of a Claude Code session goes through `copytext::rebuild` before OSC 52. culm reads the session's transcript at the release, indexes every answer and typed prompt by word, and finds the longest runs of copied words, three words at least, inside one answer or prompt. Six screen rows above the selection break a tie between two equal runs. A run comes back as its markdown, with a code span or a bold run the selection cut open closed again. Screen text outside every run keeps its rows, except a row that only met the panel edge: it joins the row above when it opens no block, sits at the indent of the text above within one space, and its first word would not fit in the columns left above, two kept free. The shell copies as drawn. On 2026-10-26 a release build read and indexed a 7.9 MB transcript in 15 ms, and rebuilt one selection in at most 2.1 ms. Evidence: the tests in `src/copytext.rs`, and `a_markdown_copy_hands_over_the_answer_as_its_transcript_holds_it` and `a_markdown_copy_without_a_transcript_still_joins_the_drawn_lines` in `tests/session_lifecycle.rs`.
 - **Selection during a scroll:** a child that scrolls itself reports no distance. culm hashes the rows before the notch and lines them up against the rows after the repaint, then moves the selection by that offset. Rows that do not line up mean a fresh screen, and culm drops the selection.
 
 ## Attention markers
@@ -239,6 +241,7 @@ These hold today. A change that breaks one of them breaks culm in a way no test 
 - A session with no transcript has never received a prompt. A restore from the archive treats a missing transcript as a session that is gone.
 - The hook payload carries `session_id`, `hook_event_name`, `tool_name`, and `notification_type`. culm reads no other field.
 - A transcript line that calls a tool holds a `tool_use` block with `name` and `input`. `Edit`, `MultiEdit`, and `Write` name their file in `input.file_path`, and `NotebookEdit` in `input.notebook_path`. A file a session changes through a shell command appears in no such block, so its repository gets no tab until the session also writes there through a tool.
+- Claude Code breaks every line of its fullscreen renderer itself, with cursor moves, so `vt100` marks no row as wrapped. A check on 2026-10-26 found no wrapped row in 4,000 rows at 80, 120, and 200 columns. Claude Code 2.1.310 breaks a line one or two columns before the panel edge. A transcript line of type `assistant` holds each answer in a `text` part of `message.content`, and a line of type `user` holds a typed prompt as the string `message.content`.
 - Claude Code asks for mouse reporting and paints its own viewport. Nothing scrolls off its screen, so `vt100` holds no scrollback for it.
 - Claude Code on Linux reads byte `0x08` as `Ctrl+Backspace` and `ESC DEL` as `Meta+Backspace`. Both delete a word.
 - Claude Code reads both `ESC [ H` and `ESC O H` as `Home`, and does not set DECCKM.
