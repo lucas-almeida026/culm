@@ -124,7 +124,7 @@ The mouse works too: click a tab or a session, drag to select and copy, middle c
 ```
 culm project list                       # every registered project
 culm project alter name <name>          # rename the project in this directory
-culm project rm <project>               # unregister it, never deletes source or branches
+culm project rm <project>               # unregister it and delete its sessions' conversations, after asking
 culm workspace list                     # every workspace and its projects
 culm workspace add <name> <project>     # add a tab to a workspace
 culm workspace remove <name> <project>  # take a tab out of a workspace

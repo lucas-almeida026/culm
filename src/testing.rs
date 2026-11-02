@@ -605,6 +605,8 @@ pub struct MemoryStore {
     saves: Arc<std::sync::atomic::AtomicUsize>,
     removed_transcripts: Arc<Mutex<Vec<(std::path::PathBuf, String)>>>,
     claude_dirs: Arc<Mutex<Vec<String>>>,
+    /// Sessions whose subagent folder exists, by directory and id.
+    session_folders: Arc<Mutex<Vec<TranscriptKey>>>,
     /// Transcript text by directory and id, and the time each file carries.
     transcripts: Arc<Mutex<std::collections::HashMap<TranscriptKey, TranscriptValue>>>,
     config: Arc<Mutex<crate::config::Config>>,
@@ -620,6 +622,7 @@ impl Default for MemoryStore {
             saves: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             removed_transcripts: Arc::new(Mutex::new(Vec::new())),
             claude_dirs: Arc::new(Mutex::new(Vec::new())),
+            session_folders: Arc::new(Mutex::new(Vec::new())),
             transcripts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             config: Arc::new(Mutex::new(crate::config::Config::default())),
             workspaces: Arc::new(Mutex::new(crate::workspace::Workspaces::default())),
@@ -689,6 +692,31 @@ impl MemoryStore {
         );
     }
 
+    /// Seeds the subagent folder Claude Code keeps beside one transcript.
+    pub fn put_session_folder(&self, dir: &str, id: &str) {
+        lock(&self.session_folders).push((dir.to_string(), id.to_string()));
+    }
+
+    /// The ids of the transcripts one directory still holds, sorted.
+    #[must_use]
+    pub fn transcript_ids(&self, dir: &str) -> Vec<String> {
+        let mut ids: Vec<String> = lock(&self.transcripts)
+            .keys()
+            .filter(|(d, _)| d == dir)
+            .map(|(_, id)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// True while the subagent folder of one session exists.
+    #[must_use]
+    pub fn has_session_folder(&self, dir: &str, id: &str) -> bool {
+        lock(&self.session_folders)
+            .iter()
+            .any(|(d, i)| d == dir && i == id)
+    }
+
     /// Every transcript culm asked to delete, as the working directory and the id.
     #[must_use]
     pub fn removed_transcripts(&self) -> Vec<(std::path::PathBuf, String)> {
@@ -727,7 +755,24 @@ impl crate::store::Store for MemoryStore {
 
     fn remove_transcript(&self, cwd: &std::path::Path, id: &str) -> Result<()> {
         lock(&self.removed_transcripts).push((cwd.to_path_buf(), id.to_string()));
+        let key = (crate::project::transcript_dir_name(cwd), id.to_string());
+        lock(&self.transcripts).remove(&key);
+        lock(&self.session_folders).retain(|k| *k != key);
         Ok(())
+    }
+
+    fn session_files(&self, cwd: &std::path::Path, id: &str) -> Result<Vec<std::path::PathBuf>> {
+        let dir = crate::project::transcript_dir_name(cwd);
+        let key = (dir.clone(), id.to_string());
+        let base = std::path::Path::new("~/.claude/projects").join(&dir);
+        let mut files = Vec::new();
+        if lock(&self.transcripts).contains_key(&key) {
+            files.push(base.join(format!("{id}.jsonl")));
+        }
+        if lock(&self.session_folders).contains(&key) {
+            files.push(base.join(id));
+        }
+        Ok(files)
     }
 
     fn remove_project(&self, slug: &str) -> Result<()> {
@@ -754,12 +799,6 @@ impl crate::store::Store for MemoryStore {
 
     fn save_workspaces(&self, workspaces: &crate::workspace::Workspaces) -> Result<()> {
         *lock(&self.workspaces) = workspaces.clone();
-        Ok(())
-    }
-
-    fn remove_claude_dir(&self, name: &str) -> Result<()> {
-        lock(&self.claude_dirs).retain(|d| d != name);
-        lock(&self.transcripts).retain(|(dir, _), _| dir != name);
         Ok(())
     }
 

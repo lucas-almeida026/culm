@@ -330,23 +330,25 @@ pub fn dir_belongs_to(root: &Path, dir_name: &str, recursive: bool) -> bool {
 /// Everything one `culm project rm` removes outside its own state file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Removal {
-    /// Directory names under `~/.claude/projects`.
-    pub claude_dirs: Vec<String>,
+    /// The working directory and the id of every session the project registered,
+    /// which name its transcript.
+    pub sessions: Vec<(PathBuf, String)>,
 }
 
 /// Decides what a removal touches. Pure, so the destructive set is testable.
 ///
-/// `claude_dirs` is the directory listing of `~/.claude/projects`. A directory
-/// belongs to the project when it is the root itself, or sits under the root. The
-/// separator is required, so `/home/x/spm2` never matches `/home/x/spm`.
+/// Only the sessions the project registered count, archived ones included. A
+/// directory under `~/.claude/projects` also holds conversations culm never held,
+/// and Claude Code's own memory, so a removal never takes a directory whole.
 #[must_use]
-pub fn plan_removal(project: &Project, claude_dirs: &[String], recursive: bool) -> Removal {
-    let claude_dirs = claude_dirs
-        .iter()
-        .filter(|name| dir_belongs_to(&project.root, name, recursive))
-        .cloned()
-        .collect();
-    Removal { claude_dirs }
+pub fn plan_removal(project: &Project) -> Removal {
+    Removal {
+        sessions: project
+            .sessions
+            .iter()
+            .map(|s| (s.cwd.clone(), s.id.clone()))
+            .collect(),
+    }
 }
 
 /// What the session registered, handed to it at each start: its ticket, its port
@@ -522,33 +524,25 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_removal_takes_the_root_directory_only() {
-        let dirs = vec![
-            "-home-x-spm".to_string(),
-            "-home-x-spm--worktrees-api-mate-feat-a".to_string(),
-        ];
-        let plan = plan_removal(&project_with_a_session(), &dirs, false);
-        assert_eq!(plan.claude_dirs, vec!["-home-x-spm".to_string()]);
-    }
+    fn a_removal_names_every_registered_session_and_nothing_else() {
+        let mut project = project_with_a_session();
+        let mut archived = project.sessions[0].clone();
+        archived.id = "id-2".into();
+        archived.state = SessionState::Archived;
+        archived.cwd = PathBuf::from("/home/x/spm");
+        project.sessions.push(archived);
 
-    #[test]
-    fn a_recursive_removal_takes_every_directory_under_the_root() {
-        let dirs = vec![
-            "-home-x-spm".to_string(),
-            "-home-x-spm--worktrees-api-mate-feat-a".to_string(),
-        ];
-        let plan = plan_removal(&project_with_a_session(), &dirs, true);
-        assert_eq!(plan.claude_dirs.len(), 2);
-    }
+        let plan = plan_removal(&project);
 
-    #[test]
-    fn a_sibling_project_with_a_longer_name_is_never_taken() {
-        let dirs = vec!["-home-x-spm".to_string(), "-home-x-spm2".to_string()];
-        let plan = plan_removal(&project_with_a_session(), &dirs, true);
         assert_eq!(
-            plan.claude_dirs,
-            vec!["-home-x-spm".to_string()],
-            "spm2 is a different project, not a directory under spm"
+            plan.sessions,
+            vec![
+                (
+                    PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
+                    "id-1".to_string()
+                ),
+                (PathBuf::from("/home/x/spm"), "id-2".to_string()),
+            ]
         );
     }
 

@@ -184,6 +184,7 @@ A refused command makes the command line exit with an error, so a script sees it
 - A keystroke marks the project dirty, and the next tick writes it, so typing never costs a file write.
 - A field added to a record carries `#[serde(default)]`, so an older file still reads.
 - A new enum variant is the exception. culm 0.1.1 refuses a project file that holds an `archived` session.
+- culm deletes Claude Code data one session at a time, through `Store::remove_transcript`: the session's `<uuid>.jsonl` and the `<uuid>/` folder beside it. The `Store` trait has no call that deletes a directory under `~/.claude/projects`, because such a directory also holds conversations culm never held and Claude Code's own `memory/`. A session delete (`Alt+Shift+X`) and `culm project rm` both use the one call. `FsStore` refuses an id that is not one plain name, so a damaged record cannot reach outside the directory. Evidence: `removing_a_session_takes_its_subagent_folder_and_leaves_every_other_file` and `an_id_that_leaves_the_directory_is_refused` in `src/store.rs`.
 
 ## Worktrees, tickets, and port numbers
 
@@ -238,6 +239,7 @@ These hold today. A change that breaks one of them breaks culm in a way no test 
 
 ### About Claude Code
 
+- Claude Code keeps a `<uuid>/` folder beside the transcript of a session that ran a subagent, with the subagents' own transcripts in `<uuid>/subagents/`. A directory under `~/.claude/projects` also holds a `memory/` folder. A check on 2026-11-02 of the `spm` directory found 44 transcripts and 29 session folders.
 - Claude Code writes the transcript of a session to `~/.claude/projects/<dir>/<uuid>.jsonl`. `<dir>` is the session's working directory, with every `/` and every `.` replaced by `-`. culm derives the path with `transcript_dir_name` and never asks Claude Code.
 - `--resume <uuid>` works only from the working directory the transcript was written in. A session's `cwd` therefore never changes after creation.
 - A session with no transcript has never received a prompt. A restore from the archive treats a missing transcript as a session that is gone.

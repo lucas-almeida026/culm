@@ -29,8 +29,13 @@ pub trait Store: fmt::Debug {
     fn save_project(&self, project: &Project) -> Result<()>;
     fn read_claude_settings(&self) -> Result<Value>;
     fn write_claude_settings(&self, settings: &Value) -> Result<()>;
-    /// Removes the transcript of one session. Deletion has no undo.
+    /// Removes what Claude Code keeps for one session: its transcript, `<id>.jsonl`,
+    /// and the folder `<id>/` beside it, which holds its subagents. Every other
+    /// file of the directory stays. Deletion has no undo.
     fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()>;
+    /// The files `remove_transcript` would delete for one session, among those that
+    /// exist, so a removal can list them before it asks.
+    fn session_files(&self, cwd: &Path, id: &str) -> Result<Vec<PathBuf>>;
     /// Forgets a project's own saved state. Deletes nothing the project holds.
     fn remove_project(&self, slug: &str) -> Result<()>;
     /// The directory names under `~/.claude/projects`.
@@ -39,14 +44,19 @@ pub trait Store: fmt::Debug {
     fn list_transcripts(&self, dir: &str) -> Result<Vec<TranscriptFile>>;
     /// The whole text of one transcript.
     fn read_transcript(&self, dir: &str, id: &str) -> Result<String>;
-    /// Removes one whole directory under `~/.claude/projects`.
-    fn remove_claude_dir(&self, name: &str) -> Result<()>;
     /// The settings that apply to every project. A missing file reads as defaults.
     fn load_config(&self) -> Result<crate::config::Config>;
     fn save_config(&self, config: &crate::config::Config) -> Result<()>;
     /// Every workspace. A missing file reads as none.
     fn load_workspaces(&self) -> Result<crate::workspace::Workspaces>;
     fn save_workspaces(&self, workspaces: &crate::workspace::Workspaces) -> Result<()>;
+}
+
+/// True for an id that names one entry inside a directory. A session id is a uuid,
+/// so anything else is a damaged record, and a removal must never follow it out of
+/// the directory.
+fn is_one_name(id: &str) -> bool {
+    !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\'])
 }
 
 /// Reads and writes real files under the state directory.
@@ -130,6 +140,17 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T>
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+impl FsStore {
+    /// The transcript of one session and the folder beside it.
+    fn session_paths(&self, cwd: &Path, id: &str) -> Result<(PathBuf, PathBuf)> {
+        if !is_one_name(id) {
+            anyhow::bail!("{id:?} is not a session id");
+        }
+        let dir = self.claude_projects.join(transcript_dir_name(cwd));
+        Ok((dir.join(format!("{id}.jsonl")), dir.join(id)))
     }
 }
 
@@ -264,29 +285,26 @@ impl Store for FsStore {
         write_atomic(&self.config_file, text.as_bytes())
     }
 
-    fn remove_claude_dir(&self, name: &str) -> Result<()> {
-        // A name is always one path segment from `list_claude_dirs`, so it cannot
-        // escape the projects directory.
-        let path = self.claude_projects.join(name);
-        match std::fs::remove_dir_all(&path) {
+    fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()> {
+        let (file, folder) = self.session_paths(cwd, id)?;
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            // A session that never wrote a turn has no transcript, and that is not a
+            // failure to delete it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("remove {}", file.display())),
+        }
+        match std::fs::remove_dir_all(&folder) {
             Ok(()) => Ok(()),
+            // Only a session that ran a subagent has the folder.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("remove {}", folder.display())),
         }
     }
 
-    fn remove_transcript(&self, cwd: &Path, id: &str) -> Result<()> {
-        let path = self
-            .claude_projects
-            .join(transcript_dir_name(cwd))
-            .join(format!("{id}.jsonl"));
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            // A session that never wrote a turn has no transcript, and that is not a
-            // failure to delete it.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
-        }
+    fn session_files(&self, cwd: &Path, id: &str) -> Result<Vec<PathBuf>> {
+        let (file, folder) = self.session_paths(cwd, id)?;
+        Ok([file, folder].into_iter().filter(|p| p.exists()).collect())
     }
 }
 
@@ -333,6 +351,61 @@ mod tests {
             sibling.exists(),
             "another session in the same directory survives"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn removing_a_session_takes_its_subagent_folder_and_leaves_every_other_file() {
+        let root = temp_dir("subagents");
+        let store = store_at(&root);
+        let cwd = Path::new("/home/x");
+        let dir = root.join("claude/projects").join(transcript_dir_name(cwd));
+        let folder = dir.join("managed/subagents");
+        let memory = dir.join("memory");
+        std::fs::create_dir_all(&folder).expect("subagent folder");
+        std::fs::create_dir_all(&memory).expect("memory folder");
+        std::fs::write(dir.join("managed.jsonl"), b"{}").expect("write");
+        std::fs::write(folder.join("agent-1.jsonl"), b"{}").expect("write");
+        std::fs::write(dir.join("not-in-culm.jsonl"), b"{}").expect("write");
+        std::fs::write(memory.join("MEMORY.md"), b"notes").expect("write");
+
+        assert_eq!(
+            store.session_files(cwd, "managed").expect("list"),
+            vec![dir.join("managed.jsonl"), dir.join("managed")]
+        );
+        store
+            .remove_transcript(cwd, "managed")
+            .expect("remove succeeds");
+
+        assert!(!dir.join("managed.jsonl").exists());
+        assert!(
+            !dir.join("managed").exists(),
+            "the subagent folder goes with it"
+        );
+        assert!(
+            dir.join("not-in-culm.jsonl").exists(),
+            "a conversation culm never held stays"
+        );
+        assert!(
+            memory.join("MEMORY.md").exists(),
+            "Claude Code's memory stays"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_id_that_leaves_the_directory_is_refused() {
+        let root = temp_dir("escape");
+        let store = store_at(&root);
+        let cwd = Path::new("/home/x");
+        let dir = root.join("claude/projects").join(transcript_dir_name(cwd));
+        std::fs::create_dir_all(&dir).expect("project dir");
+        std::fs::write(dir.join("keep.jsonl"), b"{}").expect("write");
+
+        for id in ["..", ".", "", "../other", "a/b"] {
+            assert!(store.remove_transcript(cwd, id).is_err(), "{id:?}");
+        }
+        assert!(dir.join("keep.jsonl").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 

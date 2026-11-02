@@ -1,6 +1,7 @@
 //! The command line. Every project operation is reachable without the interface, so
 //! a shell script reaches culm too.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
@@ -12,7 +13,7 @@ use crate::git::Git;
 use crate::hooks;
 use crate::namer::Namer;
 use crate::project::{
-    Project, ProjectEntry, Registry, Removal, Repository, SessionRecord, SessionRepo, SessionState,
+    Project, ProjectEntry, Registry, Repository, SessionRecord, SessionRepo, SessionState,
     dir_belongs_to, plan_removal, slugify, transcript_dir_name, unique_slug,
 };
 use crate::store::Store;
@@ -155,9 +156,6 @@ pub enum ProjectCmd {
         /// Skip the confirmation. Widens nothing.
         #[arg(long)]
         force: bool,
-        /// Also remove the Claude Code data of every path under the root.
-        #[arg(long)]
-        recursive: bool,
     },
     /// Change a property of a project.
     #[command(subcommand)]
@@ -370,11 +368,9 @@ pub fn run(
         Some(Command::Project(ProjectCmd::Import { project })) => {
             project_import_cmd(store, namer, project.as_deref(), cwd)
         }
-        Some(Command::Project(ProjectCmd::Rm {
-            project,
-            force,
-            recursive,
-        })) => project_rm(store, &project, force, recursive),
+        Some(Command::Project(ProjectCmd::Rm { project, force })) => {
+            project_rm(store, &project, force)
+        }
         Some(Command::Project(ProjectCmd::Repo(RepoCmd::Add { path, project }))) => {
             repo_add(store, &path, project.as_deref(), cwd)
         }
@@ -655,38 +651,60 @@ fn project_list(store: &dyn Store) -> Result<Outcome> {
     Ok(Outcome::Done)
 }
 
-/// Prints what a removal touches, so the confirmation is informed.
-fn describe(project: &Project, plan: &Removal) {
+/// Prints what a removal touches, file by file, so the confirmation is informed.
+fn describe(project: &Project, files: &[PathBuf]) {
     println!("removing project {}", project.slug);
-    println!("  registry entry and culm state");
-    for dir in &plan.claude_dirs {
-        println!("  claude data  ~/.claude/projects/{dir}");
+    println!("  its registry entry and its culm state");
+    if files.is_empty() {
+        println!("  no Claude Code conversation of its sessions is on disk");
+    } else {
+        println!("  the Claude Code conversations of its sessions:");
+        for file in files {
+            println!("    {}", file.display());
+        }
     }
-    println!("no worktree, no branch, no source file, and no repository is deleted.");
+    println!("every other conversation, Claude Code's memory, every worktree, branch,");
+    println!("source file, and repository stays.");
 }
 
-fn project_rm(store: &dyn Store, slug: &str, force: bool, recursive: bool) -> Result<Outcome> {
+/// True for the answer that allows a removal. Anything else keeps everything, so
+/// a stray Enter never deletes.
+#[must_use]
+pub fn confirms_removal(answer: &str) -> bool {
+    matches!(answer.trim_end_matches(['\n', '\r']), "y" | "Y")
+}
+
+fn project_rm(store: &dyn Store, slug: &str, force: bool) -> Result<Outcome> {
     let mut registry = store.load_registry()?;
     let entry = registry
         .find(slug)
         .ok_or_else(|| anyhow!("no project named {slug}. run: culm project list"))?
         .clone();
     let project = load_or_new(store, &entry)?;
-    let plan = plan_removal(&project, &store.list_claude_dirs()?, recursive);
+    let plan = plan_removal(&project);
+    let mut files = Vec::new();
+    for (cwd, id) in &plan.sessions {
+        files.extend(store.session_files(cwd, id)?);
+    }
 
-    describe(&project, &plan);
+    describe(&project, &files);
     if !force {
-        println!("type the project name to confirm:");
-        let mut typed = String::new();
-        std::io::stdin().read_line(&mut typed)?;
-        if typed.trim() != slug {
+        if files.is_empty() {
+            print!("Remove the project? [y/N] ");
+        } else {
+            print!("Delete all of them? [y/N] ");
+        }
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !confirms_removal(&answer) {
             println!("cancelled. nothing was removed.");
             return Ok(Outcome::Done);
         }
     }
 
-    for dir in &plan.claude_dirs {
-        store.remove_claude_dir(dir)?;
+    for (cwd, id) in &plan.sessions {
+        store.remove_transcript(cwd, id)?;
     }
     store.remove_project(slug)?;
     registry.projects.retain(|p| p.slug != slug);

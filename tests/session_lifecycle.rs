@@ -1760,18 +1760,9 @@ fn delete_does_nothing_while_the_shell_is_focused() {
     assert_eq!(app.entries().len(), 1);
 }
 
-#[test]
-fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
-    let f = Fakes::new();
-    let mut registry = culm::project::Registry::default();
-    registry.add(ROOT);
-    f.store.save_registry(&registry).expect("registry saves");
-    f.store.put_project(&project());
-    f.store
-        .put_claude_dirs(["-home-x-spm", "-home-x-spm--worktrees-api-mate-feat-a"]);
-
+fn rm(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
     culm::cli::run(
-        culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force"]),
+        culm::cli::Cli::try_parse_from(args)?,
         &f.store,
         &f.git,
         &culm::testing::FakeNamer::default(),
@@ -1780,56 +1771,98 @@ fn rm_removes_the_registry_entry_the_state_and_the_root_transcripts() {
         std::path::Path::new("/tmp"),
         &culm::cli::Caller::default(),
     )
-    .expect("rm succeeds");
+}
+
+/// The project `spm`, registered, with the sessions given.
+fn spm_with(f: &Fakes, sessions: Vec<SessionRecord>) {
+    let mut registry = culm::project::Registry::default();
+    registry.add(ROOT);
+    f.store.save_registry(&registry).expect("registry saves");
+    let mut project = project();
+    project.sessions = sessions;
+    f.store.put_project(&project);
+}
+
+/// What happened on 2026-10-29: a removal took the whole Claude Code directory of
+/// the root, with every conversation culm never held.
+#[test]
+fn rm_deletes_only_the_conversations_of_registered_sessions() {
+    let f = Fakes::new();
+    spm_with(&f, vec![record("feat-a", SessionState::Paused)]);
+    let dir = culm::project::transcript_dir_name(Path::new(ROOT));
+    f.store.put_transcript(&dir, "id-feat-a", 0, "{}");
+    f.store.put_session_folder(&dir, "id-feat-a");
+    f.store
+        .put_transcript(&dir, "a-conversation-culm-never-held", 0, "{}");
+    f.store.put_transcript(&dir, "another-one", 0, "{}");
+
+    rm(&f, &["culm", "project", "rm", "spm", "--force"]).expect("rm succeeds");
 
     assert!(f.store.load_registry().expect("load").projects.is_empty());
     assert!(f.store.project("spm").is_none());
     assert_eq!(
+        f.store.transcript_ids(&dir),
+        vec![
+            "a-conversation-culm-never-held".to_string(),
+            "another-one".to_string()
+        ],
+        "only the registered session's conversation goes"
+    );
+    assert!(
+        !f.store.has_session_folder(&dir, "id-feat-a"),
+        "its subagent folder goes with it"
+    );
+    assert_eq!(
         f.store.list_claude_dirs().expect("list"),
-        vec!["-home-x-spm--worktrees-api-mate-feat-a".to_string()],
-        "without --recursive only the root transcripts go"
+        vec![dir],
+        "the directory itself stays"
     );
 }
 
 #[test]
-fn rm_recursive_takes_every_transcript_under_the_root_and_leaves_worktrees() {
+fn rm_takes_the_conversation_of_a_session_that_runs_under_the_root() {
     let f = Fakes::new();
-    let mut registry = culm::project::Registry::default();
-    registry.add(ROOT);
-    f.store.save_registry(&registry).expect("registry saves");
+    let mut session = record("feat-a", SessionState::Archived);
+    session.cwd = PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a");
+    spm_with(&f, vec![session]);
+    let under =
+        culm::project::transcript_dir_name(Path::new("/home/x/spm/.worktrees/api-mate-feat-a"));
+    f.store.put_transcript(&under, "id-feat-a", 0, "{}");
+    f.store.put_transcript(&under, "not-registered", 0, "{}");
 
-    let mut project = project();
-    let mut session = record("feat-a", SessionState::Paused);
-    session.repos = vec![culm::project::SessionRepo {
-        name: "api-mate".into(),
-        worktree: PathBuf::from("/home/x/spm/.worktrees/api-mate-feat-a"),
-        branch: "feat-a".into(),
-    }];
-    project.sessions = vec![session];
-    f.store.put_project(&project);
-    f.store.put_claude_dirs([
-        "-home-x-spm",
-        "-home-x-spm--worktrees-api-mate-feat-a",
-        "-home-x-other",
-    ]);
-
-    culm::cli::run(
-        culm::cli::Cli::parse_from(["culm", "project", "rm", "spm", "--force", "--recursive"]),
-        &f.store,
-        &f.git,
-        &culm::testing::FakeNamer::default(),
-        &culm::testing::FakeHookListener::new(),
-        std::path::Path::new("/usr/bin/culm"),
-        std::path::Path::new("/tmp"),
-        &culm::cli::Caller::default(),
-    )
-    .expect("rm succeeds");
+    rm(&f, &["culm", "project", "rm", "spm", "--force"]).expect("rm succeeds");
 
     assert_eq!(
-        f.store.list_claude_dirs().expect("list"),
-        vec!["-home-x-other".to_string()],
-        "a project outside the root is untouched"
+        f.store.transcript_ids(&under),
+        vec!["not-registered".to_string()]
     );
+}
+
+#[test]
+fn rm_takes_no_recursive_flag() {
+    let f = Fakes::new();
+    spm_with(&f, Vec::new());
+
+    let refused = rm(
+        &f,
+        &["culm", "project", "rm", "spm", "--force", "--recursive"],
+    );
+
+    assert!(
+        refused.is_err(),
+        "the flag no longer widens anything, so it is gone"
+    );
+    assert!(f.store.project("spm").is_some(), "nothing was removed");
+}
+
+#[test]
+fn only_y_confirms_a_removal() {
+    for yes in ["y\n", "Y\n", "y\r\n", "y"] {
+        assert!(culm::cli::confirms_removal(yes), "{yes:?}");
+    }
+    for no in ["\n", "n\n", "N\n", "yes\n", "Y \n", " y\n", ""] {
+        assert!(!culm::cli::confirms_removal(no), "{no:?}");
+    }
 }
 
 #[test]
