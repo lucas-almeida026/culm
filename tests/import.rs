@@ -72,7 +72,7 @@ fn a_titled_transcript_keeps_its_uuid_and_takes_the_slugified_title() {
         .join("\n"),
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.imported, 1);
     assert_eq!(report.named, 0, "a titled transcript needs no namer");
@@ -97,7 +97,7 @@ fn an_untitled_transcript_is_named_by_the_namer() {
         &prompt_line(ROOT, "the login bug is back"),
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.named, 1);
     assert_eq!(project.sessions[0].slug, "fix-the-login-bug");
@@ -116,7 +116,7 @@ fn a_namer_failure_falls_back_to_the_uuid() {
         &prompt_line(ROOT, "the login bug is back"),
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.imported, 1, "the session still imports");
     assert_eq!(project.sessions[0].slug, "session-aaaaaaaa");
@@ -134,7 +134,7 @@ fn a_transcript_with_nothing_to_name_it_by_is_skipped() {
         r#"{"type":"mode","mode":"normal"}"#,
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.imported, 0);
     assert_eq!(report.skipped.len(), 1);
@@ -157,7 +157,7 @@ fn a_transcript_under_a_worktree_is_imported_with_its_own_working_directory() {
         .join("\n"),
     );
 
-    import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    import_sessions(&f.store, &f.namer, &mut project, true).expect("import runs");
 
     assert_eq!(project.sessions[0].cwd, PathBuf::from(worktree));
 }
@@ -177,7 +177,7 @@ fn a_sibling_directory_with_a_longer_name_is_left_alone() {
         .join("\n"),
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.imported, 0, "spm2 is a different project");
     assert!(project.sessions.is_empty());
@@ -193,9 +193,9 @@ fn a_second_import_adds_nothing() {
         900,
         &[prompt_line(ROOT, "fix it"), title_line("fix it")].join("\n"),
     );
-    import_sessions(&f.store, &f.namer, &mut project).expect("first import");
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("first import");
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("second import");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("second import");
 
     assert_eq!(report.imported, 0);
     assert_eq!(project.sessions.len(), 1);
@@ -211,7 +211,7 @@ fn a_later_import_adds_only_the_transcripts_that_appeared_since() {
         900,
         &[prompt_line(ROOT, "the first one"), title_line("first")].join("\n"),
     );
-    import_sessions(&f.store, &f.namer, &mut project).expect("first import");
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("first import");
     project.sessions[0].name = "renamed by hand".into();
 
     f.store.put_transcript(
@@ -220,7 +220,7 @@ fn a_later_import_adds_only_the_transcripts_that_appeared_since() {
         1_000,
         &[prompt_line(ROOT, "the second one"), title_line("second")].join("\n"),
     );
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("second import");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("second import");
 
     assert_eq!(report.imported, 1);
     assert_eq!(project.sessions.len(), 2);
@@ -258,7 +258,7 @@ fn an_active_session_is_never_imported_twice() {
         &[prompt_line(ROOT, "fix it"), title_line("fix it")].join("\n"),
     );
 
-    let report = import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    let report = import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     assert_eq!(report.imported, 0);
     assert_eq!(project.sessions.len(), 1);
@@ -281,7 +281,7 @@ fn two_transcripts_with_one_title_keep_distinct_slugs() {
         );
     }
 
-    import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     let slugs: Vec<&str> = project.sessions.iter().map(|s| s.slug.as_str()).collect();
     assert_eq!(slugs, vec!["fix-it", "fix-it-2"]);
@@ -298,7 +298,7 @@ fn the_import_reaches_the_store() {
         &[prompt_line(ROOT, "fix it"), title_line("fix it")].join("\n"),
     );
 
-    import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     let saved = f.store.project("spm").expect("the project is saved");
     assert_eq!(saved.sessions.len(), 1);
@@ -415,7 +415,7 @@ fn an_imported_session_resumes_its_own_transcript() {
         900,
         &[prompt_line(ROOT, "fix it"), title_line("fix it")].join("\n"),
     );
-    import_sessions(&f.store, &f.namer, &mut project).expect("import runs");
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
 
     let spawner = FakeSpawner::new(Vec::new());
     let clock = culm::testing::FakeClock::new(1_000);
@@ -442,5 +442,183 @@ fn an_imported_session_resumes_its_own_transcript() {
     assert!(
         spec.has_flag("--resume", "aaaaaaaa-1111-2222-3333-444444444444"),
         "the imported id is the one resumed"
+    );
+}
+
+fn titled(cwd: &str, title: &str) -> String {
+    [prompt_line(cwd, "work"), title_line(title)].join("\n")
+}
+
+fn cli_with(
+    f: &Fakes,
+    hooks: &culm::testing::FakeHookListener,
+    args: &[&str],
+) -> anyhow::Result<Outcome> {
+    culm::cli::run(
+        Cli::try_parse_from(args)?,
+        &f.store,
+        &f.git,
+        &f.namer,
+        hooks,
+        std::path::Path::new("/usr/bin/culm"),
+        std::path::Path::new("/tmp"),
+        &culm::cli::Caller::default(),
+    )
+}
+
+#[test]
+fn a_plain_import_takes_only_the_root_directory() {
+    let f = Fakes::new();
+    let mut project = project();
+    f.store.put_transcript(
+        ROOT_DIR,
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        900,
+        &titled(ROOT, "root work"),
+    );
+    let worktree = "/home/x/spm/.worktrees/api-mate-feat-a";
+    f.store.put_transcript(
+        WORKTREE_DIR,
+        "bbbbbbbb-0000-0000-0000-000000000002",
+        900,
+        &titled(worktree, "worktree work"),
+    );
+
+    import_sessions(&f.store, &f.namer, &mut project, false).expect("import runs");
+    assert_eq!(
+        project.sessions.len(),
+        1,
+        "a directory under the root waits for --recursive"
+    );
+    assert_eq!(project.sessions[0].name, "root-work");
+
+    import_sessions(&f.store, &f.namer, &mut project, true).expect("import runs");
+    assert_eq!(project.sessions.len(), 2);
+}
+
+#[test]
+fn an_import_tells_the_total_first_and_saves_after_each_conversation() {
+    let f = Fakes::new();
+    let mut project = f.register();
+    for (n, title) in ["one", "two", "three"].iter().enumerate() {
+        f.store.put_transcript(
+            ROOT_DIR,
+            &format!("aaaaaaaa-0000-0000-0000-00000000000{n}"),
+            900 - n as u64,
+            &titled(ROOT, title),
+        );
+    }
+    let mut seen = Vec::new();
+
+    culm::cli::import_sessions_with(&f.store, &f.namer, &mut project, false, &mut |p| {
+        let saved = f.store.project("spm").map_or(0, |s| s.sessions.len());
+        seen.push((p.done, p.total, saved));
+    })
+    .expect("import runs");
+
+    assert_eq!(
+        seen,
+        vec![(0, 3, 0), (1, 3, 1), (2, 3, 2), (3, 3, 3)],
+        "the total comes first, and each conversation is saved before the next starts"
+    );
+}
+
+#[test]
+fn the_progress_line_fills_with_the_count() {
+    use culm::cli::{ImportProgress, progress_line};
+    assert_eq!(
+        progress_line(ImportProgress { done: 0, total: 4 }, 8),
+        "[........] 0/4"
+    );
+    assert_eq!(
+        progress_line(ImportProgress { done: 1, total: 4 }, 8),
+        "[##......] 1/4"
+    );
+    assert_eq!(
+        progress_line(ImportProgress { done: 4, total: 4 }, 8),
+        "[########] 4/4"
+    );
+}
+
+#[test]
+fn a_project_open_in_a_window_is_not_imported_into() {
+    let f = Fakes::new();
+    f.register();
+    f.store.put_transcript(
+        ROOT_DIR,
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        900,
+        &titled(ROOT, "root work"),
+    );
+    let hooks = culm::testing::FakeHookListener::new();
+    hooks.open_elsewhere("spm");
+
+    let err = cli_with(
+        &f,
+        &hooks,
+        &["culm", "project", "import", "--project", "spm"],
+    )
+    .expect_err("the import is refused");
+
+    assert!(err.to_string().contains("open in culm"), "{err}");
+    assert!(f.store.project("spm").expect("saved").sessions.is_empty());
+}
+
+#[test]
+fn project_new_on_a_registered_root_names_the_import_command() {
+    let f = Fakes::new();
+    let dir = std::env::temp_dir().join(format!("culm-import-again-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let root = std::fs::canonicalize(&dir).expect("canonical");
+    let hooks = culm::testing::FakeHookListener::new();
+    let path = root.display().to_string();
+    cli_with(
+        &f,
+        &hooks,
+        &["culm", "project", "new", &path, "--name", "again"],
+    )
+    .expect("registered");
+
+    let err = cli_with(&f, &hooks, &["culm", "project", "new", &path]).expect_err("refused");
+
+    assert!(
+        err.to_string()
+            .contains("culm project import --project again"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn recursive_needs_an_import_to_widen() {
+    assert!(Cli::try_parse_from(["culm", "open", "spm", "--recursive"]).is_err());
+    assert!(Cli::try_parse_from(["culm", "project", "new", ".", "-r"]).is_err());
+    assert!(Cli::try_parse_from(["culm", "open", "spm", "--import-native-sessions", "-r"]).is_ok());
+    assert!(Cli::try_parse_from(["culm", "project", "import", "-r"]).is_ok());
+}
+
+#[test]
+fn open_with_import_skips_a_project_another_window_holds() {
+    let f = Fakes::new();
+    f.register();
+    f.store.put_transcript(
+        ROOT_DIR,
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        900,
+        &titled(ROOT, "root work"),
+    );
+    let hooks = culm::testing::FakeHookListener::new();
+    hooks.open_elsewhere("spm");
+
+    cli_with(
+        &f,
+        &hooks,
+        &["culm", "open", "spm", "--import-native-sessions"],
+    )
+    .expect("open runs");
+
+    assert!(
+        f.store.project("spm").expect("saved").sessions.is_empty(),
+        "the other window would write over the import"
     );
 }

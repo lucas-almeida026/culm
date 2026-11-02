@@ -49,7 +49,7 @@ culm hooks install
    culm project repo add ~/work/billing/api
    ```
 
-3. Already have Claude Code sessions in that directory? Bring them in:
+3. Already have Claude Code sessions in that directory? Bring them in. Add `--recursive` to bring in the sessions of its subdirectories too:
 
    ```
    culm project import

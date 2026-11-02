@@ -69,9 +69,12 @@ pub enum Command {
         /// Open the projects of a workspace instead.
         #[arg(short = 'w', long, conflicts_with = "projects")]
         workspace: Option<String>,
-        /// Import every Claude Code session found under each root before opening.
+        /// Import the Claude Code sessions of each root before opening.
         #[arg(long)]
         import_native_sessions: bool,
+        /// Import from every directory under each root too.
+        #[arg(short, long, requires = "import_native_sessions")]
+        recursive: bool,
     },
     /// Name sets of projects, so one command opens all of them as tabs.
     #[command(subcommand)]
@@ -139,16 +142,22 @@ pub enum ProjectCmd {
         /// path.
         #[arg(long)]
         name: Option<String>,
-        /// Import every Claude Code session found under the root.
+        /// Import the Claude Code sessions of the root.
         #[arg(long)]
         import_native_sessions: bool,
+        /// Import from every directory under the root too.
+        #[arg(short, long, requires = "import_native_sessions")]
+        recursive: bool,
     },
     /// List every registered project.
     List,
-    /// Import every Claude Code session found under the root, as paused sessions.
+    /// Import the Claude Code sessions of the root, as paused sessions.
     Import {
         #[arg(long)]
         project: Option<String>,
+        /// Import from every directory under the root too.
+        #[arg(short, long)]
+        recursive: bool,
     },
     /// Remove a project. Never deletes a branch, a source file, or a repository.
     Rm {
@@ -324,19 +333,32 @@ pub fn run(
     caller: &Caller,
 ) -> Result<Outcome> {
     match cli.command {
-        None => open(store, namer, &[], cwd, false),
+        None => open(store, namer, hooks, &[], cwd, None),
         Some(Command::Open {
             projects,
             workspace: Some(workspace),
             import_native_sessions,
-        }) if projects.is_empty() => {
-            open_workspace(store, namer, &workspace, import_native_sessions)
-        }
+            recursive,
+        }) if projects.is_empty() => open_workspace(
+            store,
+            namer,
+            hooks,
+            &workspace,
+            import_native_sessions.then_some(recursive),
+        ),
         Some(Command::Open {
             projects,
             import_native_sessions,
+            recursive,
             ..
-        }) => open(store, namer, &projects, cwd, import_native_sessions),
+        }) => open(
+            store,
+            namer,
+            hooks,
+            &projects,
+            cwd,
+            import_native_sessions.then_some(recursive),
+        ),
         Some(Command::Workspace(cmd)) => workspace_cmd(store, cmd),
         Some(Command::Config(ConfigCmd::List)) => config_list(store),
         Some(Command::Config(ConfigCmd::Set { key, value })) => config_set(store, &key, &value),
@@ -360,13 +382,20 @@ pub fn run(
             path,
             name,
             import_native_sessions,
-        })) => project_new(store, namer, &path, name.as_deref(), import_native_sessions),
+            recursive,
+        })) => project_new(
+            store,
+            namer,
+            &path,
+            name.as_deref(),
+            import_native_sessions.then_some(recursive),
+        ),
         Some(Command::Project(ProjectCmd::Alter(AlterCmd::Name { name, project }))) => {
             project_rename(store, hooks, &name, project.as_deref(), cwd)
         }
         Some(Command::Project(ProjectCmd::List)) => project_list(store),
-        Some(Command::Project(ProjectCmd::Import { project })) => {
-            project_import_cmd(store, namer, project.as_deref(), cwd)
+        Some(Command::Project(ProjectCmd::Import { project, recursive })) => {
+            project_import_cmd(store, namer, hooks, project.as_deref(), cwd, recursive)
         }
         Some(Command::Project(ProjectCmd::Rm { project, force })) => {
             project_rm(store, &project, force)
@@ -420,7 +449,7 @@ fn project_new(
     namer: &dyn Namer,
     path: &Path,
     name: Option<&str>,
-    import: bool,
+    import: Option<bool>,
 ) -> Result<Outcome> {
     let root = std::fs::canonicalize(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
     if !root.is_dir() {
@@ -429,8 +458,9 @@ fn project_new(
     let mut registry = store.load_registry()?;
     if let Some(existing) = registry.holds_root(&root) {
         bail!(
-            "{} is already the project {}",
+            "{} is already the project {}. to import its Claude Code sessions, run: culm project import --project {}",
             root.display(),
+            existing.slug,
             existing.slug
         );
     }
@@ -447,8 +477,8 @@ fn project_new(
     let mut project = Project::new(&entry.slug, &root);
     store.save_project(&project)?;
     println!("project {} at {}", entry.slug, root.display());
-    if import {
-        report(&import_sessions(store, namer, &mut project)?);
+    if let Some(recursive) = import {
+        run_import(store, namer, &mut project, recursive)?;
     }
     Ok(Outcome::Done)
 }
@@ -498,15 +528,72 @@ fn project_rename(
     Ok(Outcome::Done)
 }
 
+/// Imports into a project, unless a window holds it open. The window writes the
+/// state it holds on its next tick, so every session the import added would be lost.
 fn project_import_cmd(
     store: &dyn Store,
     namer: &dyn Namer,
+    hooks: &dyn crate::hooks::HookListener,
     slug: Option<&str>,
     cwd: &Path,
+    recursive: bool,
 ) -> Result<Outcome> {
     let mut project = resolve(store, slug, cwd)?;
-    report(&import_sessions(store, namer, &mut project)?);
+    if hooks.is_open(&project.slug) {
+        bail!("{}", open_import_refusal(&project.slug));
+    }
+    run_import(store, namer, &mut project, recursive)?;
     Ok(Outcome::Done)
+}
+
+fn open_import_refusal(slug: &str) -> String {
+    format!("{slug} is open in culm. close its tab, then import.")
+}
+
+/// Runs one import with its total and its progress bar on the terminal.
+fn run_import(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    project: &mut Project,
+    recursive: bool,
+) -> Result<()> {
+    use std::io::IsTerminal;
+    let drawn = std::io::stderr().is_terminal();
+    let mut announced = false;
+    let result = import_sessions_with(store, namer, project, recursive, &mut |p| {
+        if !announced && p.total > 0 {
+            announced = true;
+            println!("importing {} conversations", p.total);
+        }
+        if drawn && p.total > 0 {
+            eprint!("\r{}", progress_line(p, PROGRESS_WIDTH));
+            if p.done == p.total {
+                eprintln!();
+            }
+        }
+    });
+    report(&result?);
+    Ok(())
+}
+
+/// Columns the progress bar takes between its brackets.
+const PROGRESS_WIDTH: usize = 30;
+
+/// One line of the import's progress bar, such as `[###.......] 3/10`.
+#[must_use]
+pub fn progress_line(p: ImportProgress, width: usize) -> String {
+    let filled = if p.total == 0 {
+        width
+    } else {
+        p.done.min(p.total) * width / p.total
+    };
+    format!(
+        "[{}{}] {}/{}",
+        "#".repeat(filled),
+        ".".repeat(width - filled),
+        p.done,
+        p.total
+    )
 }
 
 /// What one import did. Printing is the caller's job, so the decision stays testable.
@@ -536,8 +623,16 @@ fn fallback_name(id: &str) -> String {
     format!("session-{}", id.chars().take(8).collect::<String>())
 }
 
-/// Pulls every Claude Code transcript under the root into the project as a paused
-/// session.
+/// How far an import, or an import step, has come: conversations handled so far,
+/// of the total the import found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// Pulls the Claude Code transcripts of the root into the project as paused
+/// sessions. `recursive` reaches every directory under the root as well.
 ///
 /// The session id is kept, so `--resume` reaches the same conversation. A transcript
 /// whose id the project already holds is left alone, which makes a second import add
@@ -546,6 +641,24 @@ pub fn import_sessions(
     store: &dyn Store,
     namer: &dyn Namer,
     project: &mut Project,
+    recursive: bool,
+) -> Result<ImportReport> {
+    import_sessions_with(store, namer, project, recursive, &mut |_| {})
+}
+
+/// `import_sessions`, telling `progress` the total before the first conversation and
+/// the count after each one.
+///
+/// The project is saved after every conversation it gains. Naming a conversation
+/// can take seconds, so an import of a hundred runs for minutes, and an interrupted
+/// one keeps what it did. A second run skips the ids the project holds, so it goes
+/// on where the first stopped.
+pub fn import_sessions_with(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    project: &mut Project,
+    recursive: bool,
+    progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<ImportReport> {
     let mut report = ImportReport::default();
     let root_dir = transcript_dir_name(&project.root);
@@ -554,8 +667,9 @@ pub fn import_sessions(
 
     let mut dirs = store.list_claude_dirs()?;
     dirs.sort();
+    let mut pending = Vec::new();
     for dir in dirs {
-        if !dir_belongs_to(&project.root, &dir, true) {
+        if !dir_belongs_to(&project.root, &dir, recursive) {
             continue;
         }
         let mut files = store.list_transcripts(&dir)?;
@@ -563,9 +677,21 @@ pub fn import_sessions(
         // one the user just left.
         files.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs).then(a.id.cmp(&b.id)));
         for file in files {
-            if known.contains(&file.id) {
-                continue;
+            if !known.contains(&file.id) {
+                pending.push((dir.clone(), file));
             }
+        }
+    }
+    let total = pending.len();
+    progress(ImportProgress { done: 0, total });
+
+    for (done, (dir, file)) in pending.into_iter().enumerate() {
+        // A conversation is done when the next one starts, whether it was imported
+        // or skipped.
+        if done > 0 {
+            progress(ImportProgress { done, total });
+        }
+        {
             let head = transcript::scan(&file.id, &store.read_transcript(&dir, &file.id)?);
             if head.custom_title.is_none() && head.first_prompt.is_none() {
                 report
@@ -624,8 +750,10 @@ pub fn import_sessions(
                 archived_from: None,
             });
             report.imported += 1;
+            store.save_project(project)?;
         }
     }
+    progress(ImportProgress { done: total, total });
     store.save_project(project)?;
     Ok(report)
 }
@@ -796,9 +924,10 @@ fn repo_list(store: &dyn Store, slug: Option<&str>, cwd: &Path) -> Result<Outcom
 fn open(
     store: &dyn Store,
     namer: &dyn Namer,
+    hooks: &dyn crate::hooks::HookListener,
     slugs: &[String],
     cwd: &Path,
-    import: bool,
+    import: Option<bool>,
 ) -> Result<Outcome> {
     let slugs = crate::workspace::without_repeats(slugs);
     if slugs.len() > crate::workspace::MAX_PROJECTS {
@@ -814,10 +943,8 @@ fn open(
     for slug in &slugs {
         projects.push(resolve(store, Some(slug), cwd)?);
     }
-    if import {
-        for project in &mut projects {
-            report(&import_sessions(store, namer, project)?);
-        }
+    if let Some(recursive) = import {
+        import_before_open(store, namer, hooks, &mut projects, recursive)?;
     }
     Ok(Outcome::Open(Box::new(OpenPlan {
         projects,
@@ -825,13 +952,34 @@ fn open(
     })))
 }
 
+/// Imports into each project about to open. A project another window holds is
+/// skipped, because that window would write over the import, and the window this
+/// command opens refuses that project anyway.
+fn import_before_open(
+    store: &dyn Store,
+    namer: &dyn Namer,
+    hooks: &dyn crate::hooks::HookListener,
+    projects: &mut [Project],
+    recursive: bool,
+) -> Result<()> {
+    for project in projects {
+        if hooks.is_open(&project.slug) {
+            println!("{} no import done.", open_import_refusal(&project.slug));
+            continue;
+        }
+        run_import(store, namer, project, recursive)?;
+    }
+    Ok(())
+}
+
 /// Opens the projects of a workspace, in its order. A project removed since the
 /// workspace was saved is reported and skipped.
 fn open_workspace(
     store: &dyn Store,
     namer: &dyn Namer,
+    hooks: &dyn crate::hooks::HookListener,
     name: &str,
-    import: bool,
+    import: Option<bool>,
 ) -> Result<Outcome> {
     let workspaces = store.load_workspaces()?;
     let workspace = workspaces
@@ -856,10 +1004,8 @@ fn open_workspace(
             workspace.name
         );
     }
-    if import {
-        for project in &mut projects {
-            report(&import_sessions(store, namer, project)?);
-        }
+    if let Some(recursive) = import {
+        import_before_open(store, namer, hooks, &mut projects, recursive)?;
     }
     Ok(Outcome::Open(Box::new(OpenPlan {
         projects,

@@ -231,6 +231,8 @@ Two features run `claude` without a terminal:
 | Recap on pause | `claude -p --no-session-persistence --resume <id> /recap` | Without `--no-session-persistence`, the recap appends to the real transcript and moves its time. |
 | Naming an import | `claude -p --bare --model haiku --no-session-persistence --tools "" --output-format text` | `--bare` skips the hooks, so naming posts no marker. `--tools ""` leaves the child no way to touch the machine. |
 
+An import names one conversation at a time, on the thread of the command, so it shows the total first and a progress bar on standard error while a terminal is attached. It saves the project after each conversation it adds, so an interrupted import keeps what it did, and a second run goes on where the first stopped. An import reads only the Claude Code directory of the root, unless `--recursive` widens it to every directory under the root. A project open in a window is never imported into, because the window writes the state it holds over the file.
+
 A recap runs only after the child is gone, because Claude Code refuses to resume a session that it still lists as running. A recap that takes more than 45 seconds is abandoned.
 
 ## Assumptions the code makes without saying so
