@@ -930,11 +930,11 @@ impl crate::stats::MemoryProbe for FakeMemoryProbe {
     }
 }
 
-/// The sound server's sources, set by the test. Holds one wanted microphone until a
-/// test changes it, so a test about something else sees no warning.
+/// The sound server's sources, set by the test, and how often culm asked for them.
 #[derive(Debug, Clone)]
 pub struct FakeMicrophones {
     sources: Arc<Mutex<Result<Vec<crate::mic::AudioSource>, String>>>,
+    asked: Arc<AtomicU64>,
 }
 
 /// The name the default fake microphone carries.
@@ -948,6 +948,7 @@ impl Default for FakeMicrophones {
                 description: None,
                 monitor_source: None,
             }]))),
+            asked: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -969,10 +970,17 @@ impl FakeMicrophones {
     pub fn fail(&self) {
         *lock(&self.sources) = Err("pactl: not found".into());
     }
+
+    /// How many times culm asked the sound server for its sources.
+    #[must_use]
+    pub fn asked(&self) -> u64 {
+        self.asked.load(Ordering::Relaxed)
+    }
 }
 
 impl crate::mic::Microphones for FakeMicrophones {
     fn sources(&self) -> Result<Vec<crate::mic::AudioSource>> {
+        self.asked.fetch_add(1, Ordering::Relaxed);
         lock(&self.sources).clone().map_err(|e| anyhow!(e))
     }
 }

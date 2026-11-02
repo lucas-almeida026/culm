@@ -92,7 +92,7 @@ pub const UNDO_NO_SHELL: &str = "alt+shift+z undoes a paste in a claude code ses
 const UNDO_NOTICE_SECS: u64 = 5;
 
 /// What the status bar shows while the last session to start has no wanted microphone.
-pub const NO_MIC: &str = "no microphone matched. voice dictation uses the system default.";
+pub const NO_MIC: &str = "no microphone matched the microphones setting. voice dictation uses the system default. run: culm mic list";
 
 /// The side effects the application needs. Passed at the call, never stored, so a
 /// test hands over fakes.
@@ -495,19 +495,22 @@ impl App {
 
     /// Starts one session on the wanted microphone. The sound server is asked at each
     /// start, so a microphone plugged in later reaches the next session to start.
+    /// With no `microphones` setting, culm asks nothing and leaves the choice to the
+    /// system.
     fn start(&mut self, record: &SessionRecord, deps: &Deps<'_>) -> Result<Session> {
         // A new process starts with an empty prompt, so no paste is left to undo.
         self.pastes.remove(&record.id);
         let mut spec = self.spec_for(record);
-        let sources = deps.mic.sources().unwrap_or_default();
-        self.mic_missing = match crate::mic::pick(&sources) {
-            Some(name) => {
-                spec.env
-                    .push((crate::mic::PULSE_SOURCE.into(), name.into()));
-                false
+        self.mic_missing = false;
+        if !self.config.microphones.is_empty() {
+            let sources = deps.mic.sources().unwrap_or_default();
+            match crate::mic::pick(&sources, &self.config.microphones) {
+                Some(name) => spec
+                    .env
+                    .push((crate::mic::PULSE_SOURCE.into(), name.into())),
+                None => self.mic_missing = true,
             }
-            None => true,
-        };
+        }
         Session::spawn(deps.spawner, &spec)
     }
 

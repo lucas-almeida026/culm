@@ -885,8 +885,8 @@ const SHORTCUTS: [(&str, &str); 21] = [
 /// The settings that apply to every project, one switch per row.
 fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
     let width = 70.min(panel.width.saturating_sub(2));
-    // Fifteen lines of content, plus the two border rows.
-    let height = 17.min(panel.height);
+    // Eighteen lines of content, plus the two border rows.
+    let height = 20.min(panel.height);
     let area = Rect {
         x: panel.x + (panel.width.saturating_sub(width)) / 2,
         y: panel.y + (panel.height.saturating_sub(height)) / 2,
@@ -928,6 +928,13 @@ fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
         ]),
         dim("        lines come back whole, from the session's transcript."),
         Line::from(""),
+        // A list of texts has no switch, so the form shows it and names the command.
+        Line::from(format!(
+            "        microphones: {}",
+            microphones_shown(config)
+        )),
+        dim("        change with: culm config set microphones \"<text>, <text>\""),
+        Line::from(""),
         dim(" Up Down move   Space toggles   Esc closes"),
     ];
     f.render_widget(Clear, area);
@@ -935,6 +942,15 @@ fn draw_settings(f: &mut Frame, app: &App, panel: Rect) {
         Paragraph::new(lines).block(Block::bordered().title(" settings ")),
         area,
     );
+}
+
+/// The `microphones` setting as the settings form shows it.
+fn microphones_shown(config: &crate::config::Config) -> String {
+    if config.microphones.is_empty() {
+        "none set, so the system picks".to_string()
+    } else {
+        config.microphones.join(", ")
+    }
 }
 
 /// The archive list: its own search box, the archived sessions newest first, and
@@ -1437,6 +1453,52 @@ mod tests {
         assert!(screen.contains(" archive "), "{screen}");
         assert!(screen.contains("lost could not be restored"), "{screen}");
         assert!(screen.contains("no archived session"), "{screen}");
+    }
+
+    #[test]
+    fn the_settings_form_shows_the_microphones_and_the_command_that_sets_them() {
+        use crate::app::Deps;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(crate::project::Project::new("spm", "/home/x/spm"));
+        app.set_config(crate::config::Config {
+            microphones: vec!["NoiseTorch".into(), "Family 17h/19h".into()],
+            ..crate::config::Config::default()
+        });
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        let deps = Deps {
+            spawner: &crate::testing::FakeSpawner::new(Vec::new()),
+            git: &crate::testing::FakeGit::default(),
+            store: &crate::testing::MemoryStore::new(),
+            clock: &crate::testing::FakeClock::new(0),
+            recapper: &crate::testing::FakeRecapper::new(),
+            hooks: &crate::testing::FakeHookListener::new(),
+            mic: &crate::testing::FakeMicrophones::default(),
+        };
+        app.on_key(&KeyEvent::new(KeyCode::Char('S'), alt_shift), &deps)
+            .expect("the settings open");
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 26)).expect("the test backend starts");
+        terminal
+            .draw(|f| {
+                draw(f, &app);
+            })
+            .expect("the screen draws");
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..26)
+            .map(|y| {
+                (0..100)
+                    .filter_map(|x| buffer.cell(Position { x, y }))
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("microphones: NoiseTorch, Family 17h/19h"),
+            "{screen}"
+        );
+        assert!(screen.contains("culm config set microphones"), "{screen}");
     }
 
     #[test]

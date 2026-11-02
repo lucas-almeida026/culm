@@ -1,9 +1,9 @@
 //! The microphone a session records from. Claude Code's voice dictation reads the
-//! PulseAudio source named in `PULSE_SOURCE`, and the system default on this
-//! machine is a loopback device that hears nothing.
+//! PulseAudio source named in `PULSE_SOURCE`. The system default is not always a
+//! microphone: on the maintainer's machine it is a loopback device that hears
+//! nothing.
 //!
-//! The choice is fixed in the code for the author's machine. It becomes a setting
-//! when a second machine needs it.
+//! The `microphones` setting names the wanted sources, best first.
 
 use std::fmt;
 use std::process::Command;
@@ -13,11 +13,6 @@ use serde::Deserialize;
 
 /// The variable the PulseAudio client library reads for its input device.
 pub const PULSE_SOURCE: &str = "PULSE_SOURCE";
-
-/// Wanted sources, best first. Each matches a source whose name or description
-/// holds the text. NoiseTorch names its filter after the device it cleans, so the
-/// second entry is the device NoiseTorch picks when it runs.
-const WANTED: [&str; 2] = ["NoiseTorch", "Family 17h/19h"];
 
 /// One input the sound server offers.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -65,17 +60,29 @@ pub fn parse_sources(json: &[u8]) -> Result<Vec<AudioSource>> {
     Ok(serde_json::from_slice(json)?)
 }
 
-/// The source a session records from, or `None` when no wanted source exists.
-/// A monitor never wins, although its description names the same device.
+/// The inputs a session can record from: every source but the monitors, which
+/// record what a sink plays.
 #[must_use]
-pub fn pick(sources: &[AudioSource]) -> Option<&str> {
-    WANTED.iter().find_map(|wanted| {
-        sources
-            .iter()
-            .filter(|s| !s.is_monitor())
+pub fn inputs(sources: &[AudioSource]) -> Vec<&AudioSource> {
+    sources.iter().filter(|s| !s.is_monitor()).collect()
+}
+
+/// The source a session records from, or `None` when no wanted source exists.
+///
+/// `wanted` holds texts, best first. A source matches a text when its name or its
+/// description holds it, whatever the case. A monitor never wins, although its
+/// description names the same device.
+#[must_use]
+pub fn pick<'a>(sources: &'a [AudioSource], wanted: &[String]) -> Option<&'a str> {
+    wanted.iter().find_map(|text| {
+        let text = text.to_lowercase();
+        inputs(sources)
+            .into_iter()
             .find(|s| {
-                s.name.contains(wanted)
-                    || s.description.as_ref().is_some_and(|d| d.contains(wanted))
+                s.name.to_lowercase().contains(&text)
+                    || s.description
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(&text))
             })
             .map(|s| s.name.as_str())
     })
@@ -120,9 +127,13 @@ mod tests {
         ]
     }
 
+    fn wanted() -> Vec<String> {
+        vec!["NoiseTorch".into(), "Family 17h/19h".into()]
+    }
+
     #[test]
     fn noisetorch_wins_while_it_runs() {
-        assert_eq!(pick(&machine()), Some(NOISETORCH));
+        assert_eq!(pick(&machine(), &wanted()), Some(NOISETORCH));
     }
 
     #[test]
@@ -131,7 +142,7 @@ mod tests {
             .into_iter()
             .filter(|s| s.name != NOISETORCH)
             .collect();
-        assert_eq!(pick(&sources), Some(DEVICE));
+        assert_eq!(pick(&sources, &wanted()), Some(DEVICE));
     }
 
     #[test]
@@ -140,7 +151,30 @@ mod tests {
             .into_iter()
             .filter(|s| s.name != NOISETORCH && s.name != DEVICE)
             .collect();
-        assert_eq!(pick(&sources), None);
+        assert_eq!(pick(&sources, &wanted()), None);
+    }
+
+    #[test]
+    fn the_list_order_wins_over_the_order_of_the_sources() {
+        let wanted = vec!["family".to_string(), "noisetorch".to_string()];
+        assert_eq!(
+            pick(&machine(), &wanted),
+            Some(DEVICE),
+            "the first text that matches decides, whatever the case"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_picks_nothing() {
+        assert_eq!(pick(&machine(), &[]), None);
+    }
+
+    #[test]
+    fn the_inputs_leave_the_monitors_out() {
+        let machine = machine();
+        let names: Vec<&str> = inputs(&machine).iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.iter().any(|n| n.ends_with(".monitor")));
+        assert_eq!(names.len(), 3);
     }
 
     #[test]

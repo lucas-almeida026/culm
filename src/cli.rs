@@ -88,6 +88,9 @@ pub enum Command {
     /// Read or change the settings that apply to every project.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Show the microphones of this machine, for the `microphones` setting.
+    #[command(subcommand)]
+    Mic(MicCmd),
     /// Read or change what a session registered: its ticket, its port number, and
     /// the worktrees it works through. Inside a culm session, every subcommand acts
     /// on that session unless --session names another.
@@ -117,6 +120,13 @@ pub enum WorkspaceCmd {
     Remove { name: String, project: String },
     /// Rename a workspace.
     Rename { name: String, new_name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MicCmd {
+    /// List every input the sound server offers, and mark the one the
+    /// `microphones` setting picks.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,6 +338,7 @@ pub fn run(
     git: &dyn Git,
     namer: &dyn Namer,
     hooks: &dyn crate::hooks::HookListener,
+    mic: &dyn crate::mic::Microphones,
     exe: &Path,
     cwd: &Path,
     caller: &Caller,
@@ -361,6 +372,13 @@ pub fn run(
         ),
         Some(Command::Workspace(cmd)) => workspace_cmd(store, cmd),
         Some(Command::Config(ConfigCmd::List)) => config_list(store),
+        Some(Command::Mic(MicCmd::List)) => {
+            let wanted = store.load_config()?.microphones;
+            for line in mic_listing(&mic.sources()?, &wanted) {
+                println!("{line}");
+            }
+            Ok(Outcome::Done)
+        }
         Some(Command::Config(ConfigCmd::Set { key, value })) => config_set(store, &key, &value),
         Some(Command::Hook) => {
             hooks::send_from_stdin();
@@ -578,6 +596,43 @@ fn run_import(
 
 /// Columns the progress bar takes between its brackets.
 const PROGRESS_WIDTH: usize = 30;
+
+/// The lines `culm mic list` prints: one per input, the picked one marked with
+/// `*`, and a last line on what the setting does with them.
+#[must_use]
+pub fn mic_listing(sources: &[crate::mic::AudioSource], wanted: &[String]) -> Vec<String> {
+    let inputs = crate::mic::inputs(sources);
+    let picked = crate::mic::pick(sources, wanted);
+    let width = inputs
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<String> = inputs
+        .iter()
+        .map(|s| {
+            let mark = if Some(s.name.as_str()) == picked {
+                '*'
+            } else {
+                ' '
+            };
+            let pad = width - s.name.chars().count();
+            let description = s.description.as_deref().unwrap_or("");
+            format!("{mark} {}{}  {description}", s.name, " ".repeat(pad))
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    lines.push(String::new());
+    lines.push(if wanted.is_empty() {
+        "the microphones setting is empty, so culm leaves the microphone to the system. to pick one, use texts from the names or descriptions above: culm config set microphones \"<text>, <text>\"".to_string()
+    } else if picked.is_some() {
+        format!("* marks the input the microphones setting ({}) picks.", wanted.join(", "))
+    } else {
+        format!("no input matches the microphones setting ({}).", wanted.join(", "))
+    });
+    lines
+}
 
 /// One line of the import's progress bar, such as `[###.......] 3/10`.
 #[must_use]

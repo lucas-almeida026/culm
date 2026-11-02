@@ -48,6 +48,7 @@ fn main() -> Result<()> {
         &SystemGit,
         &ClaudeNamer,
         &hooks::SocketHookListener,
+        &culm::mic::PactlMicrophones,
         &exe,
         &cwd,
         &cli::Caller::from_env(),

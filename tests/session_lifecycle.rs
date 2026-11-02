@@ -1767,6 +1767,7 @@ fn rm(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.git,
         &culm::testing::FakeNamer::default(),
         &culm::testing::FakeHookListener::new(),
+        &culm::testing::FakeMicrophones::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
         &culm::cli::Caller::default(),
@@ -1874,6 +1875,7 @@ fn rm_refuses_an_unknown_project() {
         &f.git,
         &culm::testing::FakeNamer::default(),
         &culm::testing::FakeHookListener::new(),
+        &culm::testing::FakeMicrophones::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new("/tmp"),
         &culm::cli::Caller::default(),
@@ -2880,6 +2882,7 @@ fn cli(f: &Fakes, args: &[&str]) -> anyhow::Result<culm::cli::Outcome> {
         &f.git,
         &culm::testing::FakeNamer::default(),
         &f.hooks,
+        &culm::testing::FakeMicrophones::default(),
         std::path::Path::new("/usr/bin/culm"),
         std::path::Path::new(ROOT),
         &culm::cli::Caller::default(),
@@ -4097,10 +4100,51 @@ fn pulse_source(spec: &SessionSpec) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
+/// An app whose `microphones` setting holds `wanted`.
+fn app_wanting(wanted: &[&str]) -> App {
+    let mut app = App::new(project());
+    app.set_config(culm::config::Config {
+        microphones: wanted.iter().map(|w| (*w).to_string()).collect(),
+        ..culm::config::Config::default()
+    });
+    app
+}
+
+#[test]
+fn with_no_microphones_setting_culm_asks_nothing_and_leaves_the_system_default() {
+    let f = Fakes::new();
+    let mut app = App::new(project());
+    app.create_session(&form("one"), &f.deps())
+        .expect("one starts");
+
+    let spec = f.spawner.specs().pop().expect("a spawn happened");
+    assert_eq!(pulse_source(&spec), None);
+    assert_eq!(f.mic.asked(), 0, "the sound server is never asked");
+    assert_ne!(app.status(), culm::app::NO_MIC, "and nothing warns");
+}
+
+#[test]
+fn the_first_text_of_the_setting_that_matches_wins() {
+    let f = Fakes::new();
+    f.mic.set(&[
+        "alsa_input.pci-0000_08_00.6.analog-stereo",
+        "NoiseTorch Microphone",
+    ]);
+    let mut app = app_wanting(&["analog-stereo", "noisetorch"]);
+    app.create_session(&form("one"), &f.deps())
+        .expect("one starts");
+
+    let spec = f.spawner.specs().pop().expect("a spawn happened");
+    assert_eq!(
+        pulse_source(&spec).as_deref(),
+        Some("alsa_input.pci-0000_08_00.6.analog-stereo")
+    );
+}
+
 #[test]
 fn a_session_records_from_the_wanted_microphone() {
     let f = Fakes::new();
-    let mut app = App::new(project());
+    let mut app = app_wanting(&["NoiseTorch", "Family 17h/19h"]);
     app.create_session(&form("one"), &f.deps())
         .expect("one starts");
 
@@ -4117,7 +4161,7 @@ fn a_session_with_no_wanted_microphone_starts_on_the_default_and_says_so() {
     let f = Fakes::new();
     f.mic
         .set(&["alsa_input.platform-snd_aloop.0.analog-stereo"]);
-    let mut app = App::new(project());
+    let mut app = app_wanting(&["NoiseTorch", "Family 17h/19h"]);
     app.create_session(&form("one"), &f.deps())
         .expect("one starts without a microphone");
 
@@ -4130,7 +4174,7 @@ fn a_session_with_no_wanted_microphone_starts_on_the_default_and_says_so() {
 fn a_session_starts_when_the_sound_server_is_unreachable() {
     let f = Fakes::new();
     f.mic.fail();
-    let mut app = App::new(project());
+    let mut app = app_wanting(&["NoiseTorch", "Family 17h/19h"]);
     app.create_session(&form("one"), &f.deps())
         .expect("one starts without pactl");
 
@@ -4144,7 +4188,7 @@ fn a_session_starts_when_the_sound_server_is_unreachable() {
 fn a_resume_picks_a_microphone_that_appeared_after_the_first_start() {
     let f = Fakes::new();
     f.mic.set(&[]);
-    let mut app = App::new(project());
+    let mut app = app_wanting(&["NoiseTorch", "Family 17h/19h"]);
     app.create_session(&form("one"), &f.deps())
         .expect("one starts");
     app.toggle_pause(&f.deps()).expect("pause succeeds");
@@ -4692,4 +4736,54 @@ fn a_notch_waits_while_the_last_one_is_measured() {
     app.settle_scroll();
     assert_eq!(notches(&f), 2, "the measure sends the next notch");
     assert_eq!(app.selection(), Some(((25, 0), (25, 7))));
+}
+
+/// The inputs of the maintainer's machine as `pactl -f json list sources` gave them
+/// on 2026-10-12, trimmed to the fields culm reads.
+const PACTL_SOURCES: &str = r#"[
+  {"name":"alsa_output.pci-0000_08_00.6.analog-stereo.monitor","description":"Monitor of Family 17h/19h HD Audio Controller Analog Stereo","monitor_source":"alsa_output.pci-0000_08_00.6.analog-stereo"},
+  {"name":"alsa_input.platform-snd_aloop.0.analog-stereo","description":"Loopback Analog Stereo","monitor_source":""},
+  {"name":"alsa_input.pci-0000_08_00.6.analog-stereo","description":"Family 17h/19h HD Audio Controller Analog Stereo","monitor_source":""},
+  {"name":"NoiseTorch Microphone for Family 17h/19h HD Audio Controller","description":"NoiseTorch Microphone for Family 17h/19h HD Audio Controller Source","monitor_source":""}
+]"#;
+
+#[test]
+fn mic_list_shows_every_input_and_marks_the_one_the_setting_picks() {
+    let sources = culm::mic::parse_sources(PACTL_SOURCES.as_bytes()).expect("pactl output");
+    let wanted = vec!["NoiseTorch".to_string(), "Family 17h/19h".to_string()];
+
+    let lines = culm::cli::mic_listing(&sources, &wanted);
+
+    assert_eq!(
+        lines.len(),
+        5,
+        "three inputs, a blank line, and the note: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(".monitor")),
+        "a monitor is no input"
+    );
+    assert!(lines[2].starts_with("* NoiseTorch Microphone"), "{lines:?}");
+    assert!(
+        lines[0].starts_with("  alsa_input.platform-snd_aloop"),
+        "{lines:?}"
+    );
+    assert!(lines[4].contains("NoiseTorch, Family 17h/19h"), "{lines:?}");
+}
+
+#[test]
+fn mic_list_with_an_empty_setting_says_how_to_fill_it() {
+    let sources = culm::mic::parse_sources(PACTL_SOURCES.as_bytes()).expect("pactl output");
+
+    let lines = culm::cli::mic_listing(&sources, &[]);
+
+    assert!(
+        !lines.iter().any(|l| l.starts_with('*')),
+        "nothing is picked"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|l| l.contains("culm config set microphones"))
+    );
 }

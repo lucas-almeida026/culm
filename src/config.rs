@@ -28,6 +28,13 @@ pub struct Config {
     /// Off by default while the rebuild is new. Claude Code breaks every line to fit
     /// the panel, so a plain copy holds a line break wherever a line met the edge.
     pub copy_markdown: bool,
+    /// Texts that pick the microphone a session records from, best first. Each one
+    /// matches an input whose name or description holds it, whatever the case.
+    ///
+    /// Empty by default, so culm leaves the microphone to the system. The names of
+    /// the inputs differ from one machine to the next, and `culm mic list` shows
+    /// this machine's.
+    pub microphones: Vec<String>,
 }
 
 impl Default for Config {
@@ -37,6 +44,7 @@ impl Default for Config {
             changes_maximized: false,
             block_ctrl_z: true,
             copy_markdown: false,
+            microphones: Vec::new(),
         }
     }
 }
@@ -46,6 +54,7 @@ pub const RECAP_ON_PAUSE: &str = "recap-on-pause";
 pub const CHANGES_MAXIMIZED: &str = "changes-maximized";
 pub const BLOCK_CTRL_Z: &str = "block-ctrl-z";
 pub const COPY_MARKDOWN: &str = "copy-markdown";
+pub const MICROPHONES: &str = "microphones";
 
 impl Config {
     /// Every setting and its current value, in the order the listing shows them.
@@ -56,6 +65,7 @@ impl Config {
             (CHANGES_MAXIMIZED, self.changes_maximized.to_string()),
             (BLOCK_CTRL_Z, self.block_ctrl_z.to_string()),
             (COPY_MARKDOWN, self.copy_markdown.to_string()),
+            (MICROPHONES, self.microphones.join(", ")),
         ]
     }
 
@@ -81,6 +91,10 @@ impl Config {
                 self.copy_markdown = parse_bool(value).ok_or(SetError::Value)?;
                 Ok(())
             }
+            MICROPHONES => {
+                self.microphones = parse_list(value);
+                Ok(())
+            }
             _ => Err(SetError::Key),
         }
     }
@@ -93,6 +107,16 @@ pub enum SetError {
     Key,
     /// The value does not read as the type the setting holds.
     Value,
+}
+
+/// Reads texts separated by commas. An empty value is an empty list.
+fn parse_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -139,6 +163,37 @@ mod tests {
         assert!(!config.copy_markdown);
         config.set(COPY_MARKDOWN, "on").expect("a known setting");
         assert!(config.copy_markdown);
+    }
+
+    #[test]
+    fn the_microphone_list_starts_empty_and_reads_comma_separated_texts() {
+        let mut config = Config::default();
+        assert!(config.microphones.is_empty());
+        config
+            .set(MICROPHONES, " NoiseTorch ,Family 17h/19h, ")
+            .expect("a known setting");
+        assert_eq!(config.microphones, vec!["NoiseTorch", "Family 17h/19h"]);
+        let listed = config.settings();
+        assert!(listed.contains(&(MICROPHONES, "NoiseTorch, Family 17h/19h".to_string())));
+        config
+            .set(MICROPHONES, "")
+            .expect("an empty value clears it");
+        assert!(config.microphones.is_empty());
+    }
+
+    #[test]
+    fn the_microphone_list_survives_the_file() {
+        let config = Config {
+            microphones: vec!["NoiseTorch".into(), "Family 17h/19h".into()],
+            ..Config::default()
+        };
+        let text = toml::to_string(&config).expect("the config serializes");
+        assert!(
+            text.contains(r#"microphones = ["NoiseTorch", "Family 17h/19h"]"#),
+            "{text}"
+        );
+        let back: Config = toml::from_str(&text).expect("and reads back");
+        assert_eq!(back.microphones, config.microphones);
     }
 
     #[test]
